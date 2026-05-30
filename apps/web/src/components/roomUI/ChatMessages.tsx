@@ -188,7 +188,11 @@ export function ChatMessages({ room, messages, currentUser, onContextMenu, roomN
                 const avatar = user?.avatar || msgOrUsername.avatar;
                 const result = resolveAvatar(avatar, msgOrUsername.sender);
                 if (result === null) return null;
-                return result;
+                return user?.profilePicture || result;
+            }
+
+            if (user?.profilePicture) {
+                return user.profilePicture;
             }
 
             if (msgOrUsername.avatar) {
@@ -204,10 +208,14 @@ export function ChatMessages({ room, messages, currentUser, onContextMenu, roomN
 
         // Username string
         const user = room.state.users.find(u => u.username === msgOrUsername);
-        if (user?.role?.toLowerCase() === 'godmaster') {
-            const result = resolveAvatar(user.avatar, msgOrUsername);
+        const userRole = user?.role?.toLowerCase();
+        if (userRole === 'godmaster') {
+            const result = resolveAvatar(user?.avatar, msgOrUsername);
             if (result === null) return null;
-            return result;
+            return user?.profilePicture || result;
+        }
+        if (user?.profilePicture) {
+            return user.profilePicture;
         }
         if (user?.avatar) {
             const resolved = resolveAvatar(user.avatar, msgOrUsername);

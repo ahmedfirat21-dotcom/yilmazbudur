@@ -317,16 +317,9 @@ export function ProfileModal({
                                 </div>
                             </div>
                             <button onClick={() => {
-                                const currentAv = currentUser?.avatar || '';
-                                const isCurrentlyAnimated = currentAv.startsWith('animated:') || currentAv.startsWith('gifnick::');
-                                if (isCurrentlyAnimated) {
-                                    // Animated nick aktifken avatar'ı localStorage'a kaydet — animated nick korunur
-                                    try { localStorage.setItem('soprano_custom_avatar', avatarUrl); } catch (e) { }
-                                    onClose();
-                                } else {
-                                    onChangeAvatar(avatarUrl);
-                                    onClose();
-                                }
+                                try { localStorage.setItem('soprano_custom_avatar', avatarUrl); } catch (e) { }
+                                onChangeAvatar(avatarUrl);
+                                onClose();
                             }} className="w-full py-3 text-sm font-bold text-white rounded-xl bg-gradient-to-r from-amber-700 to-amber-800 hover:from-amber-600 hover:to-amber-700 transition-all">
                                 Avatarı Kaydet
                             </button>

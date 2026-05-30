@@ -2,7 +2,7 @@
   "expo": {
     "name": "SopranoChat",
     "slug": "soprano-chat",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "sopranochat",
@@ -19,6 +19,7 @@
         "backgroundColor": "#0c1525"
       },
       "package": "com.sopranochat.app",
+      "versionCode": 2,
       "permissions": [
         "CAMERA",
         "RECORD_AUDIO",

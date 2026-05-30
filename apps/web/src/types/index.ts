@@ -27,6 +27,7 @@ export interface User {
     nameColor?: string;
     godmasterIcon?: string;
     platform?: 'web' | 'mobile' | 'embed';
+    profilePicture?: string;
 }
 
 export interface Message {

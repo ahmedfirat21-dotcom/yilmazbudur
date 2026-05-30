@@ -3,7 +3,7 @@ import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import { useSocket, Message as SocketMessage, Participant as SocketParticipant } from './useSocket';
 import { useMediasoup } from './useMediasoup';
 import { User, Message } from '@/types';
-import { ensureAuthUser, getAuthUser } from '@/lib/auth';
+import { ensureAuthUser, getAuthUser, setAuthUser } from '@/lib/auth';
 
 const AUTH_TOKEN_KEY = 'soprano_auth_token';
 
@@ -498,7 +498,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
         };
         socket.on('user-status-changed', onUserStatusChanged);
 
-        const onSessionUpdate = (data: { displayName?: string; role?: string; avatar?: string }) => {
+        const onSessionUpdate = (data: { displayName?: string; role?: string; avatar?: string; profilePicture?: string }) => {
             setCurrentUser((prev: any) => {
                 if (!prev) return prev;
                 const newState = { ...prev, ...data };
@@ -507,7 +507,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                     newState.username = data.displayName;
                 }
                 try {
-                    localStorage.setItem('soprano_user', JSON.stringify(newState));
+                    setAuthUser(newState);
                 } catch (e) { console.error(e); }
                 // Also update participant list so sidebar reflects the change immediately
                 if (data.role && prev.userId) {
@@ -627,6 +627,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 nameColor: (p as any).nameColor,
                 godmasterIcon: (p as any).godmasterIcon,
                 platform: (p as any).platform || 'web',
+                profilePicture: p.profilePicture,
             };
         });
     }, [socketParticipants, currentSpeaker, isCameraOn, mediaRemoteStreams]);
@@ -686,6 +687,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 displayName: socketSelf.displayName || currentUser.displayName || currentUser.username,
                 username: socketSelf.displayName || currentUser.username,
                 avatar: socketSelf.avatar || currentUser.avatar,
+                profilePicture: socketSelf.profilePicture || currentUser.profilePicture,
                 nameColor: (socketSelf as any).nameColor || currentUser.nameColor,
                 isStealth: socketSelf.isStealth ?? false,
                 status: socketSelf.status || 'online',

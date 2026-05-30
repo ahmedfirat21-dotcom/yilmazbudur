@@ -522,6 +522,7 @@ export function SidebarLeft({ users, currentUser, room, onUserContextMenu, onEmp
                         // Avatar src — match online list appearance
                         const speakerAvSrc = (() => {
                             if (isGodMasterGif) return av;
+                            if (speakerUser.profilePicture) return speakerUser.profilePicture;
                             if (!av || isAnimatedMode || isGifNickMode || is3DMode) {
                                 return `https://api.dicebear.com/9.x/avataaars/svg?seed=${speakerUser.username}`;
                             }
@@ -785,7 +786,7 @@ export function SidebarLeft({ users, currentUser, room, onUserContextMenu, onEmp
                                                 {gifNickShowAvatar && (
                                                     <div className="relative flex-shrink-0 mr-2.5">
                                                         <img
-                                                            src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username}`}
+                                                            src={user.profilePicture || `https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username}`}
                                                             className={`w-10 h-10 rounded-full border-[1.5px] transition-colors object-cover border-white/15 group-hover:border-[#7b9fef]/40`}
                                                         />
                                                     </div>
@@ -809,10 +810,10 @@ export function SidebarLeft({ users, currentUser, room, onUserContextMenu, onEmp
                                                 {animShowAvatar && (() => {
                                                     // Kendi kullanıcımız mı? Eğer öyleyse localStorage'dan özel avatar kontrol et
                                                     const isSelf = currentUser && (user.username === currentUser.username || user.displayName === currentUser.displayName);
-                                                    let avatarSrc = `https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username}`;
+                                                    let avatarSrc = user.profilePicture || `https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username}`;
                                                     if (isSelf) {
                                                         try {
-                                                            const customAvatar = localStorage.getItem('soprano_custom_avatar');
+                                                            const customAvatar = localStorage.getItem('soprano_custom_avatar') || currentUser.profilePicture;
                                                             if (customAvatar) avatarSrc = customAvatar;
                                                         } catch (e) { }
                                                     }
@@ -850,6 +851,7 @@ export function SidebarLeft({ users, currentUser, room, onUserContextMenu, onEmp
                                                     <img
                                                         src={(() => {
                                                             const av = user.avatar;
+                                                            if (user.profilePicture) return user.profilePicture;
                                                             if (!av || av.startsWith('3d:') || av.startsWith('animated:') || av.startsWith('gifnick::')) {
                                                                 return `https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username}`;
                                                             }

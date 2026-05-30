@@ -26,6 +26,7 @@ interface InMemoryParticipant {
   userId: string;
   displayName: string;
   avatar: string;
+  profilePicture?: string;
   role: string;
   socketId: string;
   roomId: string;   // Tenant-scoped Socket.IO room ID (tenantId:slug)
@@ -1016,7 +1017,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('room:join')
   async handleRoomJoin(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { roomId: string; initialStatus?: string; password?: string; disguiseName?: string; avatar?: string; gender?: string; godmasterIcon?: string },
+    @MessageBody() payload: { roomId: string; initialStatus?: string; password?: string; disguiseName?: string; avatar?: string; profilePicture?: string; gender?: string; godmasterIcon?: string },
   ) {
     const { roomId } = payload;
     const user = client.data.user;
@@ -1247,13 +1248,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         if (prisma) {
           const dbUser = await prisma.user.findUnique({
             where: { id: user.sub },
-            select: { role: true, permissions: true, avatarUrl: true, displayName: true, nameColor: true },
+            select: { role: true, permissions: true, avatarUrl: true, profilePicture: true, displayName: true, nameColor: true },
           });
           if (dbUser) {
             const oldRole = user.role;
             user.role = dbUser.role || user.role;
             user.permissions = dbUser.permissions || user.permissions;
             if (dbUser.avatarUrl) user.avatar = dbUser.avatarUrl;
+            if (dbUser.profilePicture) {
+              user.profilePicture = dbUser.profilePicture;
+            } else if (dbUser.avatarUrl && !dbUser.avatarUrl.startsWith('animated:') && !dbUser.avatarUrl.startsWith('gifnick:')) {
+              user.profilePicture = dbUser.avatarUrl;
+            }
             if (dbUser.displayName) { user.displayName = dbUser.displayName; user.username = dbUser.displayName; }
             if (dbUser.nameColor) user.nameColor = dbUser.nameColor;
             if (oldRole !== user.role) {
@@ -1282,6 +1288,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         user.avatar ||
         payload.avatar ||
         `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(user.username)}&style=circle`,
+      profilePicture:
+        user.profilePicture ||
+        payload.profilePicture ||
+        (user.avatar && !user.avatar.startsWith('animated:') && !user.avatar.startsWith('gifnick:') ? user.avatar : undefined),
       role: user.role || 'guest',
       socketId: client.id,
       roomId: scopedRoom,
@@ -2042,10 +2052,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Persist name change to DB (non-guest users only)
     try {
       if (participant.userId && !participant.userId.startsWith('guest_')) {
-        await this.authService.updateProfile(
-          { sub: participant.userId, role: participant.role },
+        const updateResult = await this.authService.updateProfile(
+          { sub: participant.userId, role: participant.role, tenantId: participant.tenantId },
           { displayName: newName } as any,
         );
+        if (updateResult && updateResult.user) {
+          client.emit('auth:session-update', updateResult.user);
+        }
 
         // Owner/admin profil değişikliğini sistem admin paneline bildir
         if (['owner', 'admin'].includes(participant.role)) {
@@ -2081,16 +2094,35 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const avatar = payload.avatar?.trim();
     if (!avatar) return;
 
-    participant.avatar = avatar;
-    if (client.data.user) {
-      client.data.user.avatar = avatar;
+    const isAnimatedNick = participant.avatar?.startsWith('animated:') || participant.avatar?.startsWith('gifnick:');
+
+    if (isAnimatedNick) {
+      participant.profilePicture = avatar;
+    } else {
+      participant.avatar = avatar;
+      participant.profilePicture = avatar;
     }
 
-    this.logger.log(`Avatar change: ${participant.displayName} in ${participant.roomId}`);
+    if (client.data.user) {
+      if (isAnimatedNick) {
+        client.data.user.profilePicture = avatar;
+      } else {
+        client.data.user.avatar = avatar;
+        client.data.user.profilePicture = avatar;
+      }
+    }
+
+    this.logger.log(`Avatar change: ${participant.displayName} in ${participant.roomId} (animatedNick=${isAnimatedNick})`);
 
     try {
       if (participant.userId && !participant.userId.startsWith('guest_')) {
-        await this.authService.updateProfile({ sub: participant.userId, role: participant.role }, { avatar: avatar });
+        const updateResult = await this.authService.updateProfile(
+          { sub: participant.userId, role: participant.role, tenantId: participant.tenantId },
+          { avatar: avatar }
+        );
+        if (updateResult && updateResult.user) {
+          client.emit('auth:session-update', updateResult.user);
+        }
       }
     } catch (e) {
       this.logger.error(`Failed to persist avatar change for ${participant.userId}: ${e.message}`);
@@ -2121,7 +2153,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       if (participant.userId && !participant.userId.startsWith('guest_')) {
         // Cast to any because nameColor isn't in the strict type yet
-        await this.authService.updateProfile({ sub: participant.userId, role: participant.role }, { nameColor: color } as any);
+        const updateResult = await this.authService.updateProfile(
+          { sub: participant.userId, role: participant.role, tenantId: participant.tenantId },
+          { nameColor: color } as any,
+        );
+        if (updateResult && updateResult.user) {
+          client.emit('auth:session-update', updateResult.user);
+        }
       }
     } catch (e) {
       this.logger.error(`Failed to persist name color change for ${participant.userId}: ${e.message}`);
@@ -3958,6 +3996,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           userId: p.userId,
           displayName: (showDisguisedAppearance || showDisguisedRole) ? (p.disguisedName || 'Misafir') : p.displayName,
           avatar: (showDisguisedAppearance || showDisguisedRole) ? `https://api.dicebear.com/9.x/avataaars/svg?seed=${p.disguisedName || 'guest'}` : p.avatar,
+          profilePicture: (showDisguisedAppearance || showDisguisedRole) ? undefined : (p.profilePicture || null),
           role: showDisguisedRole ? 'guest' : p.role,
           socketId: p.socketId,
           isStealth: p.isStealth,

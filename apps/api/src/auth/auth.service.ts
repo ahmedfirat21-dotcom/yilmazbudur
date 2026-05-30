@@ -101,6 +101,7 @@ export class AuthService {
     const userResponse = {
       ...jwtPayload,
       avatar: user.avatarUrl || null,
+      profilePicture: user.profilePicture || null,
       gender: user.gender || null,
     };
 
@@ -173,6 +174,7 @@ export class AuthService {
     const userResponse = {
       ...jwtPayload,
       avatar: guestAvatar,
+      profilePicture: null,
     };
     return {
       access_token: this.jwtService.sign(jwtPayload),
@@ -296,6 +298,7 @@ export class AuthService {
     const userResponse = {
       ...jwtPayload,
       avatar: user.avatarUrl,
+      profilePicture: user.profilePicture || null,
     };
 
     return {
@@ -395,6 +398,7 @@ export class AuthService {
     data: {
       displayName?: string;
       avatar?: string;
+      profilePicture?: string;
       email?: string;
       password?: string;
     },
@@ -412,6 +416,7 @@ export class AuthService {
         updatedUser.username = data.displayName;
       }
       if (data.avatar) updatedUser.avatar = data.avatar;
+      if (data.profilePicture) updatedUser.profilePicture = data.profilePicture;
       // Guests can't persist nameColor easily without DB, but we can update payload
       if ((data as any).nameColor) updatedUser.nameColor = (data as any).nameColor;
     } else {
@@ -419,7 +424,30 @@ export class AuthService {
       try {
         const updateData: any = {};
         if (data.displayName) updateData.displayName = data.displayName;
-        if (data.avatar) updateData.avatarUrl = data.avatar;
+        
+        // Check if user currently has an animated nickname
+        const currentUserDb = await this.prisma.user.findUnique({
+          where: { id: user.sub },
+          select: { avatarUrl: true },
+        });
+        const currentAvatarUrl = currentUserDb?.avatarUrl || '';
+        const isAnimatedNick = currentAvatarUrl.startsWith('animated:') || currentAvatarUrl.startsWith('gifnick:');
+
+        if (isAnimatedNick) {
+          if (data.avatar) {
+            updateData.profilePicture = data.avatar;
+          }
+        } else {
+          if (data.avatar) {
+            updateData.avatarUrl = data.avatar;
+            updateData.profilePicture = data.avatar; // Keep in sync for non-animated nickname users
+          }
+        }
+
+        if (data.profilePicture) {
+          updateData.profilePicture = data.profilePicture;
+        }
+
         if ((data as any).nameColor) updateData.nameColor = (data as any).nameColor;
         if (data.email) {
           updateData.email = data.email;
@@ -435,6 +463,7 @@ export class AuthService {
 
         if (dbUser.displayName) updatedUser.displayName = dbUser.displayName;
         if (dbUser.avatarUrl) updatedUser.avatar = dbUser.avatarUrl;
+        if (dbUser.profilePicture) updatedUser.profilePicture = dbUser.profilePicture;
         if (dbUser.nameColor) updatedUser.nameColor = dbUser.nameColor;
         if (dbUser.email) updatedUser.email = dbUser.email; // Ensure email in payload if needed
 
@@ -445,6 +474,7 @@ export class AuthService {
         // If update fails (maybe social user without DB record?), just update payload
         if (data.displayName) updatedUser.displayName = data.displayName;
         if (data.avatar) updatedUser.avatar = data.avatar;
+        if (data.profilePicture) updatedUser.profilePicture = data.profilePicture;
         if (data.email) updatedUser.email = data.email;
         if ((data as any).nameColor) updatedUser.nameColor = (data as any).nameColor;
       }
@@ -466,6 +496,7 @@ export class AuthService {
     const userResponse = {
       ...jwtPayload,
       avatar: updatedUser.avatar,
+      profilePicture: updatedUser.profilePicture || null,
     };
 
     return {

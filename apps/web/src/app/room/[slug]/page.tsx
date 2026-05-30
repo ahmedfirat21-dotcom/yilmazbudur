@@ -621,7 +621,7 @@ export default function RoomPage({ params }: { params: Promise<{ slug: string }>
 
         // ★ Generic room:toast handler — backend'den gelen tüm toast bildirimlerini göster
         const onRoomToast = (data: { type?: string; title?: string; message?: string }) => {
-            const toastType = (data.type === 'error' || data.type === 'warning' || data.type === 'success' || data.type === 'info')
+            const toastType = (data.type === 'error' || data.type === 'success' || data.type === 'info')
                 ? data.type : 'info';
             addToast(toastType, data.title || 'Bildirim', data.message || '');
         };

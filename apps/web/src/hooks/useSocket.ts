@@ -28,6 +28,7 @@ export type Participant = {
     displayName: string;
     socketId: string;
     avatar?: string;
+    profilePicture?: string;
     role?: string;
     isStealth?: boolean;
     isMuted?: boolean;
@@ -85,6 +86,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         const tenantUser = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('soprano_tenant_user') || 'null') : null;
         const effectiveUser = tenantUser || authUser;
         const userAvatar = effectiveUser?.avatar || undefined;
+        const userProfilePicture = effectiveUser?.profilePicture || undefined;
         const userGender = effectiveUser?.gender || undefined;
         const storedGodmasterIcon = typeof window !== 'undefined' ? localStorage.getItem('soprano_godmaster_icon') : undefined;
 
@@ -104,7 +106,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         }
         const effectiveStatus = isVipPlus ? undefined : storedStatus;
 
-        return { roomId: targetRoomId, initialStatus: effectiveStatus, disguiseName: storedDisguiseName || undefined, avatar: userAvatar, gender: userGender, godmasterIcon: storedGodmasterIcon || undefined };
+        return { roomId: targetRoomId, initialStatus: effectiveStatus, disguiseName: storedDisguiseName || undefined, avatar: userAvatar, profilePicture: userProfilePicture, gender: userGender, godmasterIcon: storedGodmasterIcon || undefined };
     }, []);
 
     // ─── Socket Connection (stable — NOT re-created on room change) ───
@@ -395,6 +397,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
                     socket.emit('user:profileUpdate', {
                         displayName: user.displayName || user.username,
                         avatar: user.avatar,
+                        profilePicture: user.profilePicture || null,
                         nameColor: user.nameColor || null,
                     });
                     console.log('[useSocket] Profile update emitted:', user.displayName || user.username);
@@ -482,6 +485,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
                     displayName: authUser.displayName || authUser.username || 'Kullanıcı',
                     role: authUser.role || 'member',
                     avatar: authUser.avatar,
+                    profilePicture: authUser.profilePicture,
                     gender: authUser.gender,
                     isMuted: false,
                     isBanned: false,

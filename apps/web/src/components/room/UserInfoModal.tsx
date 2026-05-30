@@ -58,11 +58,19 @@ export function UserInfoModal({ user, onClose }: UserInfoModalProps) {
                             fontSize: '22px', boxShadow: '0 0 20px rgba(99,102,241,0.3)',
                             overflow: 'hidden',
                         }}>
-                            {user.avatar ? (
-                                <img src={user.avatar} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                            ) : (
-                                <span>👤</span>
-                            )}
+                            {(() => {
+                                const av = user.profilePicture || user.avatar;
+                                if (!av || av.startsWith('animated:') || av.startsWith('gifnick::') || av.startsWith('3d:')) {
+                                    return (
+                                        <img 
+                                            src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${user.username || 'user'}`} 
+                                            alt="" 
+                                            style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                                        />
+                                    );
+                                }
+                                return <img src={av} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />;
+                            })()}
                         </div>
                         <div>
                             <div style={{
