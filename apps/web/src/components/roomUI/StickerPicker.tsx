@@ -104,9 +104,9 @@ export function StickerPicker({ onStickerSelect }: StickerPickerProps) {
     const stickers = STICKER_DATA[activeCategory] || [];
 
     return (
-        <div className="w-[380px] h-[460px] flex flex-col select-none">
-            {/* Category Chips */}
-            <div className="flex items-center gap-1 px-3 py-3 overflow-x-auto no-scrollbar">
+        <div className="flex select-none" style={{ width: 360, height: 210 }}>
+            {/* Sol: Kategori Tab'ları (dikey şerit) */}
+            <div className="flex flex-col items-center gap-0.5 py-2 px-1" style={{ borderRight: '1px solid #e2e8f0', width: 42 }}>
                 {CATEGORIES.map((cat) => {
                     const Icon = cat.icon;
                     const isActive = activeCategory === cat.id;
@@ -114,50 +114,53 @@ export function StickerPicker({ onStickerSelect }: StickerPickerProps) {
                         <button
                             key={cat.id}
                             onClick={() => setActiveCategory(cat.id)}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold whitespace-nowrap transition-all duration-200 ${isActive
-                                ? 'bg-pink-500/15 text-pink-400 ring-1 ring-pink-500/25 shadow-[0_0_12px_rgba(236,72,153,0.15)]'
-                                : 'bg-white/[0.03] text-gray-500 hover:bg-white/[0.06] hover:text-gray-300'
+                            className={`flex-shrink-0 p-1.5 rounded-lg transition-all duration-200 ${isActive
+                                ? 'bg-blue-100 text-blue-600'
+                                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
                                 }`}
+                            title={cat.label}
                         >
                             <Icon className="w-3.5 h-3.5" />
-                            {cat.label}
                         </button>
                     );
                 })}
             </div>
 
-            {/* Divider */}
-            <div className="mx-4 h-px bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
-
-            {/* Sticker Grid */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-3">
-                <div className="grid grid-cols-4 gap-2">
-                    {stickers.map((sticker, idx) => (
-                        <button
-                            key={`${sticker.emoji}-${idx}`}
-                            onClick={() => onStickerSelect?.(sticker.emoji)}
-                            className="group relative flex flex-col items-center justify-center gap-1 py-3 px-2 rounded-2xl bg-white/[0.02] border border-white/[0.05] hover:border-pink-500/30 hover:bg-pink-500/[0.06] transition-all duration-200 hover:scale-[1.05] active:scale-95"
-                        >
-                            {/* Sticker Emoji */}
-                            <span className="text-[38px] leading-none group-hover:scale-110 transition-transform duration-300">
-                                {sticker.emoji}
-                            </span>
-                            {/* Label */}
-                            <span className="text-[9px] font-semibold text-gray-600 group-hover:text-gray-400 transition-colors truncate max-w-full">
-                                {sticker.label}
-                            </span>
-
-                            {/* Hover glow */}
-                            <div className="absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none bg-gradient-to-br from-pink-500/5 to-amber-700/5" />
-                        </button>
-                    ))}
+            {/* Sağ: Sticker Grid */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+                {/* Kategori başlığı */}
+                <div className="px-3 py-1.5 flex items-center gap-1.5" style={{ borderBottom: '1px solid #f1f5f9' }}>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        {CATEGORIES.find(c => c.id === activeCategory)?.label || ''}
+                    </span>
+                    <span className="text-[9px] text-slate-400 ml-auto font-bold">{stickers.length} sticker</span>
                 </div>
-            </div>
 
-            {/* Footer */}
-            <div className="px-4 py-2 border-t border-white/[0.05] flex justify-between items-center">
-                <span className="text-[10px] text-gray-600 font-semibold tracking-wider uppercase">Soprano Stickers</span>
-                <span className="text-[10px] text-pink-400/60 font-bold">{stickers.length} sticker</span>
+                {/* Grid */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-2">
+                    <div className="grid grid-cols-5 gap-1.5">
+                        {stickers.map((sticker, idx) => (
+                            <button
+                                key={`${sticker.emoji}-${idx}`}
+                                onClick={() => onStickerSelect?.(sticker.emoji)}
+                                className="group relative flex flex-col items-center justify-center gap-0.5 py-2 px-1 rounded-xl transition-all duration-200 hover:scale-[1.08] active:scale-95"
+                                style={{
+                                    background: '#f8fafc',
+                                    border: '1px solid #e2e8f0',
+                                }}
+                                onMouseOver={(e) => { e.currentTarget.style.background = '#dbeafe'; e.currentTarget.style.borderColor = '#93c5fd'; }}
+                                onMouseOut={(e) => { e.currentTarget.style.background = '#f8fafc'; e.currentTarget.style.borderColor = '#e2e8f0'; }}
+                            >
+                                <span className="text-[28px] leading-none group-hover:scale-110 transition-transform duration-300">
+                                    {sticker.emoji}
+                                </span>
+                                <span className="text-[8px] font-semibold text-slate-400 group-hover:text-slate-600 transition-colors truncate max-w-full">
+                                    {sticker.label}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
             </div>
         </div>
     );

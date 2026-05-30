@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { generateGenderAvatar } from '@/lib/avatar';
 import { ThreeDTextBanner, DEFAULT_3D_PARAMS, serialize3DParams, ANIM_MODES, type ThreeDParams, type AnimMode } from './ThreeDTextBanner';
 
 interface GodMasterProfileModalProps {
@@ -25,7 +26,11 @@ const TABS = [
 ];
 
 const GODMASTER_ICONS = ['🔱', '⚡', '🌟', '👑', '💎', '🔥', '🌀', '⚔️', '🛡️', '✨', '💜', '🦅', '🐉', '☠️', '🎭', '🌙'];
-const AVATAR_STYLES = ['avataaars', 'bottts', 'fun-emoji', 'lorelei', 'pixel-art', 'thumbs'];
+const ALL_AVATARS = [
+    '/avatars/male_1.png', '/avatars/male_2.png', '/avatars/male_3.png', '/avatars/male_4.png',
+    '/avatars/female_1.png', '/avatars/female_2.png', '/avatars/female_3.png', '/avatars/female_4.png',
+    '/avatars/neutral_1.png', '/avatars/neutral_2.png', '/avatars/neutral_3.png', '/avatars/neutral_4.png',
+];
 const NAME_COLORS = [
     '#d946ef', '#a855f7', '#8b5cf6', '#6366f1', '#ec4899', '#f43f5e',
     '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#06b6d4',
@@ -119,8 +124,7 @@ export function GodMasterProfileModal({
     const [editorSection, setEditorSection] = useState<string>('anim');
 
     // Avatar
-    const [avatarSeed, setAvatarSeed] = useState('');
-    const [avatarStyle, setAvatarStyle] = useState('avataaars');
+    const [selectedAvatarUrl, setSelectedAvatarUrl] = useState('/avatars/neutral_1.png');
 
     // Name / Icon / Color
     const [newName, setNewName] = useState('');
@@ -138,7 +142,7 @@ export function GodMasterProfileModal({
         if (isOpen) {
             setActiveTab('gif');
             setNewName(currentUser?.username || '');
-            setAvatarSeed(currentUser?.username || 'godmaster');
+            setSelectedAvatarUrl(currentUser?.avatar || '/avatars/neutral_1.png');
             setSelectedColor(currentUser?.nameColor || '#d946ef');
             setCustomMainText(currentUser?.username || 'SopranoChat');
             setCustomSubText('Owner');
@@ -202,7 +206,7 @@ export function GodMasterProfileModal({
         setTimeout(() => { setSuccess(''); onClose(); }, 1000);
     };
     const handleRemoveGif = () => {
-        onChangeAvatar(`https://api.dicebear.com/9.x/avataaars/svg?seed=${currentUser?.username || 'gm'}`);
+        onChangeAvatar('/avatars/neutral_1.png');
         setGifPreview(null); setGifFileName('');
         setSuccess('GIF kaldırıldı.'); setTimeout(() => setSuccess(''), 1500);
     };
@@ -234,7 +238,7 @@ export function GodMasterProfileModal({
 
     if (!isOpen) return null;
 
-    const avatarUrl = `https://api.dicebear.com/9.x/${avatarStyle}/svg?seed=${avatarSeed}`;
+    const avatarUrl = selectedAvatarUrl;
     const modalStyle: React.CSSProperties = centered ? {} : { position: 'fixed', left: position.x, top: position.y, margin: 0, transform: 'none' };
 
     const EDITOR_SECTIONS = [
@@ -246,41 +250,43 @@ export function GodMasterProfileModal({
 
     const content = (
         <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4" onClick={onClose} style={centered ? {} : { display: 'block' }}>
-            <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-            <div ref={modalRef} className="relative w-full max-w-2xl animate-pure-fade" onClick={(e) => e.stopPropagation()}
+            <div className="absolute inset-0 bg-black/15" />
+            <div ref={modalRef} className="relative w-full max-w-lg animate-pure-fade" onClick={(e) => e.stopPropagation()}
                 style={{
                     ...modalStyle,
-                    background: 'linear-gradient(160deg, #1a0e2e 0%, #0f0a1a 50%, #1a0e2e 100%)',
-                    border: '1px solid rgba(217, 70, 239, 0.2)',
-                    borderRadius: '20px',
-                    boxShadow: '0 20px 60px rgba(0,0,0,0.7), 0 0 40px rgba(217, 70, 239, 0.08)',
+                    background: '#ffffff',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '12px',
+                    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
                 }}>
-                <div style={{ height: '2px', background: 'linear-gradient(90deg, transparent, #d946ef, #a855f7, #6366f1, transparent)', opacity: 0.8, borderRadius: '20px 20px 0 0' }} />
 
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 pt-4 pb-0" onMouseDown={handleMouseDown} style={{ cursor: 'move', userSelect: 'none' }}>
-                    <h2 className="text-lg font-bold text-white flex items-center gap-2.5">
-                        <span className="text-xl">🔱</span>
-                        <span className="bg-gradient-to-r from-fuchsia-400 to-[#7b9fef] bg-clip-text text-transparent">GodMaster Profil</span>
+                <div className="flex items-center justify-between px-4 py-2" onMouseDown={handleMouseDown} style={{ cursor: 'move', userSelect: 'none', background: '#1e293b', borderRadius: '12px 12px 0 0' }}>
+                    <h2 style={{ fontSize: 12, fontWeight: 700, color: '#fff', margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 14 }}>🔱</span>
+                        GodMaster Profil
                     </h2>
-                    <button onClick={onClose} className="text-gray-400 hover:text-white w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors">✕</button>
+                    <button onClick={onClose} style={{ width: 24, height: 24, borderRadius: 6, background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, transition: 'all 0.2s' }}
+                        onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff'; }}
+                        onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#94a3b8'; }}
+                    >✕</button>
                 </div>
 
                 {/* Tabs */}
-                <div className="flex gap-1 px-6 pt-3 pb-2 flex-wrap">
+                <div style={{ display: 'flex', gap: 3, padding: '6px 20px 4px', flexWrap: 'wrap' }}>
                     {TABS.map(tab => (
                         <button key={tab.id} onClick={() => { setActiveTab(tab.id); setError(''); setSuccess(''); }}
-                            className="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all"
                             style={{
-                                background: activeTab === tab.id ? 'rgba(217, 70, 239, 0.15)' : 'transparent',
-                                color: activeTab === tab.id ? '#e879f9' : '#64748b',
-                                border: activeTab === tab.id ? '1px solid rgba(217, 70, 239, 0.25)' : '1px solid transparent',
+                                padding: '4px 8px', fontSize: 10, fontWeight: 600, borderRadius: 7, transition: 'all 0.2s', cursor: 'pointer',
+                                background: activeTab === tab.id ? 'rgba(168,85,247,0.12)' : 'transparent',
+                                color: activeTab === tab.id ? '#c084fc' : '#64748b',
+                                border: activeTab === tab.id ? '1px solid rgba(168,85,247,0.2)' : '1px solid transparent',
                             }}>{tab.icon} {tab.label}</button>
                     ))}
                 </div>
 
                 {/* Content */}
-                <div className="px-6 pb-6 pt-2" style={{ maxHeight: activeTab === '3d' ? '70vh' : 'auto', overflowY: activeTab === '3d' ? 'auto' : 'visible' }}>
+                <div style={{ padding: '4px 20px 16px', maxHeight: activeTab === '3d' ? '65vh' : 'auto', overflowY: activeTab === '3d' ? 'auto' : 'visible' }}>
                     {error && <div className="mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
                     {success && <div className="mb-3 px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-400 text-xs">{success}</div>}
 
@@ -355,12 +361,12 @@ export function GodMasterProfileModal({
                                 <div>
                                     <label style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px', display: 'block' }}>Ana Metin</label>
                                     <input value={customMainText} onChange={(e) => setCustomMainText(e.target.value)} maxLength={16} placeholder="SopranoChat"
-                                        style={{ width: '100%', fontSize: '12px', color: '#fff', borderRadius: '8px', padding: '7px 10px', border: '1px solid rgba(255,255,255,0.1)', background: '#10121b', outline: 'none' }} />
+                                        style={{ width: '100%', fontSize: '12px', color: '#fff', borderRadius: '8px', padding: '7px 10px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(15,23,42,0.6)', outline: 'none' }} />
                                 </div>
                                 <div>
                                     <label style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px', display: 'block' }}>Alt Metin</label>
                                     <input value={customSubText} onChange={(e) => setCustomSubText(e.target.value)} maxLength={12} placeholder="Owner"
-                                        style={{ width: '100%', fontSize: '12px', color: '#fff', borderRadius: '8px', padding: '7px 10px', border: '1px solid rgba(255,255,255,0.1)', background: '#10121b', outline: 'none' }} />
+                                        style={{ width: '100%', fontSize: '12px', color: '#fff', borderRadius: '8px', padding: '7px 10px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(15,23,42,0.6)', outline: 'none' }} />
                                 </div>
                             </div>
 
@@ -466,20 +472,23 @@ export function GodMasterProfileModal({
                     {/* ═══ AVATAR ═══ */}
                     {activeTab === 'avatar' && (
                         <div className="space-y-3">
-                            <div className="flex items-center gap-4">
-                                <img src={avatarUrl} alt="Avatar" className="w-16 h-16 rounded-2xl border-2 border-fuchsia-500/20" style={{ background: '#10121b' }} />
-                                <div className="flex-1">
-                                    <label className="text-[10px] text-gray-500 mb-1 block">Seed</label>
-                                    <input value={avatarSeed} onChange={(e) => setAvatarSeed(e.target.value)} className="w-full text-xs text-white rounded-lg px-2.5 py-2 border border-white/10 focus:border-fuchsia-500/40 focus:outline-none" style={{ background: '#10121b' }} />
-                                </div>
+                            <div className="flex items-center justify-center">
+                                <img src={selectedAvatarUrl} alt="Avatar" className="w-16 h-16 rounded-2xl border-2 border-fuchsia-500/20" style={{ background: '#10121b', objectFit: 'cover' }} />
                             </div>
-                            <div className="grid grid-cols-3 gap-1.5">
-                                {AVATAR_STYLES.map(s => (
-                                    <button key={s} onClick={() => setAvatarStyle(s)} className="py-1.5 text-[10px] font-medium rounded-lg transition-all"
-                                        style={{ background: avatarStyle === s ? 'rgba(217, 70, 239, 0.15)' : 'rgba(255,255,255,0.03)', color: avatarStyle === s ? '#e879f9' : '#94a3b8', border: avatarStyle === s ? '1px solid rgba(217, 70, 239, 0.3)' : '1px solid rgba(255,255,255,0.05)' }}>{s}</button>
+                            <div className="grid grid-cols-4 gap-2">
+                                {ALL_AVATARS.map(av => (
+                                    <button key={av} onClick={() => setSelectedAvatarUrl(av)} className="rounded-xl transition-all hover:scale-105"
+                                        style={{
+                                            padding: 3,
+                                            background: selectedAvatarUrl === av ? 'rgba(217, 70, 239, 0.2)' : 'rgba(255,255,255,0.03)',
+                                            border: selectedAvatarUrl === av ? '2px solid rgba(217, 70, 239, 0.5)' : '2px solid rgba(255,255,255,0.06)',
+                                            boxShadow: selectedAvatarUrl === av ? '0 0 12px rgba(217, 70, 239, 0.2)' : 'none',
+                                        }}>
+                                        <img src={av} alt="" className="w-full aspect-square rounded-lg" style={{ objectFit: 'cover' }} />
+                                    </button>
                                 ))}
                             </div>
-                            <button onClick={() => { onChangeAvatar(avatarUrl); setSuccess('Avatar kaydedildi!'); setTimeout(() => { setSuccess(''); onClose(); }, 800); }} className="w-full py-2.5 text-sm font-bold text-white rounded-xl" style={{ background: 'linear-gradient(135deg, #d946ef, #a855f7)' }}>Avatarı Kaydet</button>
+                            <button onClick={() => { onChangeAvatar(selectedAvatarUrl); setSuccess('Avatar kaydedildi!'); setTimeout(() => { setSuccess(''); onClose(); }, 800); }} className="w-full py-2.5 text-sm font-bold text-white rounded-xl" style={{ background: 'linear-gradient(135deg, #d946ef, #a855f7)' }}>Avatarı Kaydet</button>
                         </div>
                     )}
 
@@ -487,7 +496,7 @@ export function GodMasterProfileModal({
                     {activeTab === 'name' && (
                         <div className="space-y-3">
                             <div className="text-xs text-fuchsia-300 bg-fuchsia-500/5 rounded-lg px-3 py-2 border border-fuchsia-500/10">Mevcut: {currentUser?.username || '—'}</div>
-                            <input value={newName} onChange={(e) => { setNewName(e.target.value); setError(''); }} maxLength={20} placeholder="Yeni isim..." className="w-full text-sm text-white rounded-xl px-4 py-3 border border-white/10 focus:border-fuchsia-500/40 focus:outline-none" style={{ background: '#10121b' }} />
+                            <input value={newName} onChange={(e) => { setNewName(e.target.value); setError(''); }} maxLength={20} placeholder="Yeni isim..." className="w-full text-sm text-white rounded-xl px-4 py-3 border border-white/10 focus:border-fuchsia-500/40 focus:outline-none" style={{ background: 'rgba(15,23,42,0.6)' }} />
                             <button onClick={() => { if (!newName.trim() || newName.trim().length < 2) { setError('En az 2 karakter'); return; } onChangeName(newName.trim()); setSuccess('İsim değiştirildi!'); setTimeout(() => { setSuccess(''); onClose(); }, 800); }} className="w-full py-2.5 text-sm font-bold text-white rounded-xl" style={{ background: 'linear-gradient(135deg, #d946ef, #a855f7)' }}>İsmi Değiştir</button>
                         </div>
                     )}

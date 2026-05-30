@@ -31,6 +31,7 @@ interface RightLivePanelProps {
     userLevel?: number;
     tvBroadcastLevel?: number;
     onSetTvVideo?: (url: string | null) => void;
+    isEmbed?: boolean;
 }
 
 export function RightLivePanel({
@@ -44,7 +45,8 @@ export function RightLivePanel({
     tvVolume = 0.7,
     userLevel = 0,
     tvBroadcastLevel = 0,
-    onSetTvVideo
+    onSetTvVideo,
+    isEmbed
 }: RightLivePanelProps) {
     const tvVideoRef = useRef<HTMLVideoElement>(null);
     const [collapsed, setCollapsed] = useState(false);
@@ -160,41 +162,10 @@ export function RightLivePanel({
     //  EXPANDED STATE — full panel
     // ═══════════════════════════════════════
     return (
-        <aside className="right-live-panel sidebar-right live-panel w-80 flex-shrink-0 bg-[#0C101A] border-l border-white/5 flex flex-col z-20 items-center pt-8 overflow-y-auto custom-scrollbar pb-4 relative transition-all duration-300 shadow-[-15px_0_50px_rgba(0,0,0,0.8)]">
-
-            {/* --- LIVE BADGE + CLOSE BUTTON --- */}
-            <div className="mb-4 flex items-center gap-3 w-full px-6">
-                <div className={`flex items-center gap-2 px-4 py-1.5 rounded-full ${isHasbihal ? 'bg-[#064e3b] border border-[#7b9fef] shadow-[0_0_15px_rgba(123,159,239,0.3)]' : 'bg-red-500/10 border border-red-500/20'}`}>
-                    <span className="relative flex h-2 w-2">
-                        <span className={`relative inline-flex rounded-full h-2 w-2 ${isHasbihal ? 'bg-[#7b9fef]' : 'bg-red-500'} animate-pulse`}></span>
-                    </span>
-                    <span className={`live-text text-[10px] font-bold tracking-[0.2em] ${isHasbihal ? 'text-[#a3bfff]' : 'text-red-400'}`} style={isHasbihal ? { fontFamily: "'Aref Ruqaa', serif", letterSpacing: '0.15em', paddingTop: '0.25rem' } : undefined}>{isHasbihal ? 'CANLI SOHBETİ' : t.liveStream}</span>
-                </div>
-                <div style={{ flex: 1 }} />
-                <button
-                    onClick={() => setCollapsed(true)}
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 26,
-                        height: 26,
-                        borderRadius: 6,
-                        background: 'rgba(255, 255, 255, 0.04)',
-                        border: '1px solid rgba(255, 255, 255, 0.08)',
-                        color: '#6b7280',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; e.currentTarget.style.color = '#d1d5db'; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.color = '#6b7280'; }}
-                    title={t.closePanel}
-                >
-                    <PanelRightClose className="w-3.5 h-3.5" />
-                </button>
-            </div>
+        <aside className={`right-live-panel sidebar-right live-panel ${isEmbed ? 'w-64' : 'w-80'} flex-shrink-0 bg-[#0C101A] border-l border-white/5 flex flex-col z-20 items-center pt-8 overflow-y-auto custom-scrollbar pb-4 relative transition-all duration-300 shadow-[-15px_0_50px_rgba(0,0,0,0.8)]`}>
 
             {/* --- TV SECTION --- */}
+            <div className="shrink-0 w-full px-4">
             <div className="tv-wrapper relative shrink-0">
                 <div className={`tv-monitor ${speakerStream || tvVideoUrl ? 'tv-broadcasting' : ''}`}>
                     <div className="w-full h-full bg-[#050505] flex flex-col items-center justify-center relative overflow-hidden tv-screen">
@@ -236,7 +207,7 @@ export function RightLivePanel({
                         {/* LIVE VIDEO (OVERLAY) — Tıkla büyüt */}
                         <div
                             className="absolute inset-0 z-10 cursor-pointer"
-                            onClick={() => { if (speakerStream) { setExpandedStream(speakerStream); setExpandedUsername(speakerUsername || 'Konuşmacı'); } }}
+                            onClick={() => { if (speakerStream) { setExpandedStream(speakerStream); setExpandedUsername(speakerUsername || t.speaker); } }}
                             title="Tıkla büyüt"
                         />
                         <video
@@ -279,16 +250,26 @@ export function RightLivePanel({
                     </div>
                 </div>
             </div>
+            </div>
+            {/* --- CANLI YAYIN badge (TV altı) --- */}
+            <div className="mt-2 flex items-center justify-center gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20">
+                    <span className="relative flex h-2 w-2">
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500 animate-pulse"></span>
+                    </span>
+                    <span className="text-[10px] font-bold tracking-[0.2em] text-red-400">{t.liveStream}</span>
+                </div>
+            </div>
 
-            <div className="mt-4 px-8 text-center shrink-0">
+            <div className="mt-2 px-8 text-center shrink-0">
                 <p className="text-[10px] text-gray-500 leading-relaxed font-medium">
                     {speakerStream ? (speakerUsername ? `${speakerUsername} ${t.broadcasting}.` : t.liveConnectionActive) : tvVideoUrl ? (isYoutubeUrl ? 'YouTube yayını devam ediyor.' : 'Video yayını devam ediyor.') : t.waitingStream}
                 </p>
             </div>
 
 
-            {/* --- TV Controls (Admin+) --- */}
-            {userLevel >= 5 && (
+            {/* --- TV Controls (Operator+) --- */}
+            {userLevel >= 3 && (
                 <div className="px-3 mt-2 shrink-0">
                     {tvVideoUrl && !speakerStream ? (
                         <div className="flex flex-col gap-1">
@@ -310,8 +291,8 @@ export function RightLivePanel({
                             >
                                 {tvPaused ? '▶ Devam Et' : '⏸ Duraklat'}
                             </button>
-                            {/* Durdur butonu — sadece yayın seviyesi eşit veya düşük olanlar görebilir */}
-                            {userLevel >= tvBroadcastLevel && (
+                            {/* Durdur butonu — sadece yayını açandan üst rütbe durdurabilir */}
+                            {userLevel > tvBroadcastLevel && (
                                 <button
                                     onClick={() => onSetTvVideo?.(null)}
                                     className="w-full px-3 py-1.5 rounded-lg text-[10px] font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-500/20 transition-all"
@@ -434,7 +415,9 @@ export function RightLivePanel({
 function VideoPlayer({ stream }: { stream: MediaStream }) {
     const ref = useRef<HTMLVideoElement>(null);
     useEffect(() => {
-        if (ref.current && stream) ref.current.srcObject = stream;
+        if (ref.current && stream && ref.current.srcObject !== stream) {
+            ref.current.srcObject = stream;
+        }
     }, [stream]);
     return <video ref={ref} autoPlay playsInline muted className="w-full h-full object-cover" />;
 }

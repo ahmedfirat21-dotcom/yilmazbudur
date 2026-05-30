@@ -70,6 +70,10 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
     const [announcement, setAnnouncement] = useState<{ id: string; message: string; createdAt: string } | null>(null);
     const [hasNewAnnouncement, setHasNewAnnouncement] = useState(false);
     const [duplicateBlocked, setDuplicateBlocked] = useState<{ message: string; countdown: number } | null>(null);
+    const [lastBonus, setLastBonus] = useState<{ amount: number; type: string; message: string } | null>(null);
+
+    // ★ Action indicators — kullanıcı kartlarında geçici overlay göstermek için
+    const [actionIndicators, setActionIndicators] = useState<Map<string, { icon: string; message: string; type: string; action: string; actor: string; ts: number }>>(new Map());
 
     // ─── Helper: build room:join payload ─────────────────────────────
     const buildJoinPayload = useCallback((targetRoomId: string) => {
@@ -91,7 +95,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         const storedGodmasterIcon = typeof window !== 'undefined' ? localStorage.getItem('soprano_godmaster_icon') : undefined;
 
         // ★ VIP+ roller için initialStatus gönderme — backend her zaman stealth uygular
-        // Bu sayede eski localStorage değerleri backend'i etkileyemez
+        // Ancak kullanıcı oturum içinde "görünür" olduysa sessionStorage'dan oku
         const roleLevel = (() => {
             const role = (effectiveUser?.role || 'guest').toLowerCase();
             const levels: Record<string, number> = { guest: 0, member: 1, vip: 2, operator: 3, moderator: 4, admin: 5, superadmin: 6, super_admin: 6, owner: 7, godmaster: 8 };
@@ -104,14 +108,16 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
             localStorage.removeItem('soprano_user_status');
             localStorage.removeItem('soprano_godmaster_disguise_name');
         }
-        const effectiveStatus = isVipPlus ? undefined : storedStatus;
+        // ★ sessionStorage'daki oturum-içi tercih: kullanıcı görünür olduysa 'online' gönder
+        const sessionVisibility = typeof window !== 'undefined' ? sessionStorage.getItem('soprano_session_visibility') : null;
+        const effectiveStatus = isVipPlus ? (sessionVisibility || undefined) : storedStatus;
 
         return { roomId: targetRoomId, initialStatus: effectiveStatus, disguiseName: storedDisguiseName || undefined, avatar: userAvatar, profilePicture: userProfilePicture, gender: userGender, godmasterIcon: storedGodmasterIcon || undefined };
     }, []);
 
     // ─── Socket Connection (stable — NOT re-created on room change) ───
     useEffect(() => {
-        if (!roomId) return;
+        if (!roomId || roomId === '__skip__') return;
 
         // Force token from localStorage if not provided (fixes admin/socket auth)
         const isTenantPage = typeof window !== 'undefined' && window.location.pathname.startsWith('/t/');
@@ -148,30 +154,26 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         socket.on('disconnect', () => {
             console.log('Socket disconnected');
             setIsConnected(false);
-            // NOT: data-theme burada SİLİNMİYOR — oda geçişlerinde tema flash'ını önler.
-            // Yeni oda teması room:joined event'i ile gelecek ve orada set edilecek.
         });
 
         socket.on('room:joined', (data: { messages: any[], participants: any[], rooms?: RoomInfo[], roomSettings?: any, systemSettings?: any, userPermissions?: Record<string, boolean> }) => {
             console.log('Joined room:', data);
             console.log('[useSocket] room:joined systemSettings:', data.systemSettings ? 'EXISTS' : 'NULL');
-            setMessages(data.messages || []);
-            setParticipants(data.participants || []);
+            // Merge instead of replace — prevent UI flash on reconnect
+            if (data.messages && data.messages.length > 0) {
+                setMessages(data.messages);
+            }
+            // ★ Race condition koruması: room:participants broadcast daha güncel listeyi getirdiyse 
+            // room:joined'ın onu ezmesini önle (daha fazla katılımcı = daha güncel)
+            if (data.participants && data.participants.length > 0) {
+                setParticipants(prev => {
+                    if (prev.length > data.participants.length) return prev; // Daha güncel liste zaten var
+                    return data.participants;
+                });
+            }
             if (data.rooms) setRooms(data.rooms);
             if (data.roomSettings) {
                 setRoomSettings(data.roomSettings);
-                // Oda temasını uygula — sunucu teması yoksa kullanıcının kendi tercihine dön
-                if (data.roomSettings.themeId) {
-                    document.documentElement.setAttribute('data-theme', data.roomSettings.themeId);
-                } else {
-                    // Sunucu teması yok → kullanıcının kendi seçtiği temayı koru
-                    const userTheme = localStorage.getItem('soprano_user_theme');
-                    if (userTheme && userTheme !== 'modern') {
-                        document.documentElement.setAttribute('data-theme', userTheme);
-                    } else {
-                        document.documentElement.removeAttribute('data-theme');
-                    }
-                }
             }
             if (data.systemSettings) {
                 setSystemSettings(data.systemSettings);
@@ -262,6 +264,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         });
 
         socket.on('room:participant-joined', (participant: any) => {
+            console.log('[room:participant-joined]', participant.displayName, participant.userId);
             setParticipants((prev) => {
                 if (prev.find(p => p.userId === participant.userId)) return prev;
                 return [...prev, participant];
@@ -270,23 +273,21 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
 
         // Add listener for full participant list updates (e.g. status changes)
         socket.on('room:participants', (data: { participants: any[] }) => {
-            console.log('[room:participants] Updated:', data.participants.length, 'users', data.participants.map(p => `${p.displayName}(role=${p.role},stealth=${p.isStealth},status=${p.status})`));
-            setParticipants(data.participants);
+            console.log('[room:participants] received:', data.participants.length, 'users:', data.participants.map((p: any) => p.displayName).join(', '));
+            setParticipants(prev => {
+                const next = data.participants;
+                // Quick length check
+                if (prev.length !== next.length) return next;
+                // Deep compare by serializing — only update if actually changed
+                const prevKey = prev.map(p => `${p.userId}|${p.displayName}|${p.role}|${p.isStealth}|${p.status}|${p.isMuted}|${p.isGagged}|${p.isBanned}|${p.isCamBlocked}|${p.avatar}|${(p as any).nameColor}`).join(',');
+                const nextKey = next.map((p: any) => `${p.userId}|${p.displayName}|${p.role}|${p.isStealth}|${p.status}|${p.isMuted}|${p.isGagged}|${p.isBanned}|${p.isCamBlocked}|${p.avatar}|${p.nameColor}`).join(',');
+                if (prevKey === nextKey) return prev; // No change — skip re-render
+                return next;
+            });
         });
 
-        // ★ Real-time ban/unban updates for ALL users in the room (instant sidebar update)
-        socket.on('room:user-banned', (data: { userId: string }) => {
-            console.log('[room:user-banned] userId:', data.userId);
-            setParticipants(prev => prev.map(p =>
-                p.userId === data.userId ? { ...p, isBanned: true } : p
-            ));
-        });
-        socket.on('room:user-unbanned', (data: { userId: string }) => {
-            console.log('[room:user-unbanned] userId:', data.userId);
-            setParticipants(prev => prev.map(p =>
-                p.userId === data.userId ? { ...p, isBanned: false } : p
-            ));
-        });
+        // ★ NOTE: user-status-changed, room:user-banned, room:user-unbanned are handled
+        // exclusively in useRoomRealtime.ts to avoid duplicate setParticipants calls.
 
         socket.on('room:participant-left', (payload: { userId: string, socketId: string }) => {
             setParticipants((prev) => prev.filter(p => p.userId !== payload.userId));
@@ -298,6 +299,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
             // Dispatch custom event so room page can handle via router.push (SPA navigation)
             window.dispatchEvent(new CustomEvent('soprano:force-navigate', { detail: data }));
         });
+
 
         // Password-protected room handler
         socket.on('room:password-required', (data: { roomId: string; roomName: string; rooms?: RoomInfo[] }) => {
@@ -312,20 +314,6 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         socket.on('room:settings-updated', (data: any) => {
             console.log('[Room Settings] Updated:', data);
             setRoomSettings(data);
-            // Tema değişikliğini anında uygula
-            if (data.themeId !== undefined) {
-                if (data.themeId) {
-                    document.documentElement.setAttribute('data-theme', data.themeId);
-                } else {
-                    // Sunucu teması kaldırıldı → kullanıcının kendi tercihine dön
-                    const userTheme = localStorage.getItem('soprano_user_theme');
-                    if (userTheme && userTheme !== 'modern') {
-                        document.documentElement.setAttribute('data-theme', userTheme);
-                    } else {
-                        document.documentElement.removeAttribute('data-theme');
-                    }
-                }
-            }
         });
 
         // Gerçek zamanlı oda katılımcı sayısı güncellemesi
@@ -387,6 +375,14 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
             setHasNewAnnouncement(true);
         });
 
+        // Bonus bildirimi (günlük, VIP haftalık, oda giriş puanı)
+        socket.on('dailyBonus:received', (data: { amount: number; type: string; message: string }) => {
+            console.log('[dailyBonus:received]', data);
+            setLastBonus(data);
+            // 5sn sonra temizle
+            setTimeout(() => setLastBonus(null), 5000);
+        });
+
         // ═══ Profil senkronizasyonu (cross-tab + aynı tab) ═══
         const emitProfileUpdate = () => {
             if (!socket.connected) return;
@@ -434,6 +430,8 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
                 const stealthRoles = ['vip', 'operator', 'moderator', 'admin', 'super_admin', 'superadmin', 'owner', 'godmaster'];
                 if (stealthRoles.includes(role)) {
                     localStorage.removeItem('soprano_user_status');
+                    // Tab kapanınca oturum-içi görünürlük tercihi de temizlensin
+                    sessionStorage.removeItem('soprano_session_visibility');
                     if (role === 'godmaster') {
                         localStorage.removeItem('soprano_godmaster_disguise_name');
                     }
@@ -473,6 +471,7 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         }
         // Clear stale data
         setMessages([]);
+        setParticipants([]);
         setRoomSettings(null);
         setPasswordRequired(null);
         setRoomError(null);
@@ -557,5 +556,8 @@ export const useSocket = ({ roomId, token, tenantId }: UseSocketProps) => {
         setAnnouncement,
         duplicateBlocked,
         userPermissions,
+        lastBonus,
+        actionIndicators,
+        setActionIndicators,
     };
 };

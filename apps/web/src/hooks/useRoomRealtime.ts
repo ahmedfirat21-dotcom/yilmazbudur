@@ -4,6 +4,7 @@ import { useSocket, Message as SocketMessage, Participant as SocketParticipant }
 import { useMediasoup } from './useMediasoup';
 import { User, Message } from '@/types';
 import { ensureAuthUser, getAuthUser, setAuthUser } from '@/lib/auth';
+import { generateGenderAvatar } from '@/lib/avatar';
 
 const AUTH_TOKEN_KEY = 'soprano_auth_token';
 
@@ -56,6 +57,9 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
         setAnnouncement,
         duplicateBlocked,
         userPermissions,
+        lastBonus,
+        actionIndicators,
+        setActionIndicators,
     } = useSocket({ roomId: slug, token });
 
     // Mediasoup — camera/video + audio streaming
@@ -89,6 +93,10 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
     const [availableDevices, setAvailableDevices] = useState<any>({ videoInputs: [], audioInputs: [], audioOutputs: [] });
     const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
     const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string | null>(null);
+    const selectedAudioDeviceIdRef = useRef(selectedAudioDeviceId);
+    selectedAudioDeviceIdRef.current = selectedAudioDeviceId;
+    const currentUserRef = useRef(currentUser);
+    currentUserRef.current = currentUser;
 
     // Speaker / Mic State (SERVER-DRIVEN)
     const [currentSpeaker, setCurrentSpeaker] = useState<SpeakerInfo | null>(null);
@@ -100,7 +108,6 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
     // Chat State
     const [isChatLocked, setIsChatLocked] = useState(false);
     const [isLocalChatStopped, setIsLocalChatStopped] = useState(false); // Stop Text Local
-    const [blockedUsers, setBlockedUsers] = useState<string[]>([]); // Locally blocked users (unused yet)
     const [isCurrentUserMuted, setIsCurrentUserMuted] = useState(false);
     const [isCurrentUserGagged, setIsCurrentUserGagged] = useState(false);
 
@@ -145,6 +152,14 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
         setMicTimeLeft(0);
     }, []);
 
+    // Cleanup mic stream helper (must be defined BEFORE the socket listener useEffect)
+    const cleanupMicStream = useCallback(() => {
+        if (micStreamRef.current) {
+            micStreamRef.current.getTracks().forEach(t => t.stop());
+            micStreamRef.current = null;
+        }
+    }, []);
+
     // ─── Socket Listeners for Mic Events ─────────────────
     useEffect(() => {
         if (!socket) return;
@@ -161,14 +176,13 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 startCountdown(data.duration, data.startedAt);
             }
 
-            // If it's us, activate mic and produce audio via mediasoup
             const authUser = getAuthUser();
             if (authUser && data.userId === authUser.userId) {
                 setIsMicOn(true);
                 try {
                     const constraints: MediaStreamConstraints = {
-                        audio: selectedAudioDeviceId
-                            ? { deviceId: { exact: selectedAudioDeviceId } }
+                        audio: selectedAudioDeviceIdRef.current
+                            ? { deviceId: { exact: selectedAudioDeviceIdRef.current } }
                             : true,
                     };
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -176,10 +190,12 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                     const audioTrack = stream.getAudioTracks()[0];
                     if (audioTrack) {
                         await produceAudio(audioTrack);
-                        console.log('[Mic] Audio track produced via mediasoup');
                     }
                 } catch (err: any) {
                     console.error('[Mic] Failed to capture audio:', err);
+                    setIsMicOn(false);
+                    // Server'a mic bırakma bildir — UI bug'da kalmasın
+                    socket.emit('mic:release', { roomId: slug });
                     setToastMessage({ type: 'error', title: 'Mikrofon Hatası', message: err.message || 'Mikrofon yakılanamıyor.' });
                 }
             }
@@ -240,9 +256,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
 
         const onMicGranted = async (data: { grantedBy: string }) => {
             setToastMessage({ type: 'success', title: 'Mikrofon Verildi', message: `${data.grantedBy} size mikrofon verdi. Bağlanıyor...` });
-
-            // Audio is now handled by LiveKit
-            console.log('Mic granted — audio handled by LiveKit');
+            // TODO: LiveKit entegrasyonu burada audio capture başlatmalı
         };
 
         const onQueueUpdated = (newQueue: string[]) => {
@@ -315,8 +329,8 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             if (data.action === 'mute') {
                 if (data.isMuted) {
                     setIsCurrentUserMuted(true);
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isMuted: true });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isMuted: true });
                     }
                     setToastMessage({ type: 'error', title: '🔇 Susturuldunuz', message: 'Yönetici tarafından mikrofon yetkiniz kaldırıldı.' });
                     if (isMicOnRef.current) {
@@ -326,30 +340,30 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                     }
                 } else {
                     setIsCurrentUserMuted(false);
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isMuted: false });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isMuted: false });
                     }
                     setToastMessage({ type: 'success', title: '🔊 Susturma Kaldırıldı', message: 'Artık tekrar mikrofon kullanabilirsiniz.' });
                 }
             } else if (data.action === 'gag') {
                 if (data.isGagged) {
                     setIsCurrentUserGagged(true);
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isGagged: true });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isGagged: true });
                     }
                     setToastMessage({ type: 'error', title: '🤐 Yazı Yasağı', message: 'Yönetici tarafından yazma yetkiniz kaldırıldı.' });
                 } else {
                     setIsCurrentUserGagged(false);
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isGagged: false });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isGagged: false });
                     }
                     setToastMessage({ type: 'success', title: '✏️ Yazı Yasağı Kaldırıldı', message: 'Artık tekrar yazabilirsiniz.' });
                 }
             } else if (data.action === 'cam_block') {
                 if (data.isCamBlocked) {
                     // Participant verisini güncelle — toggleCamera kontrolü burayı okur
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isCamBlocked: true });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isCamBlocked: true });
                     }
                     setToastMessage({ type: 'error', title: '📷 Kamera Engellendi', message: 'Kameranız yönetici tarafından kapatıldı.' });
                     if (isCameraOnRef.current) {
@@ -361,8 +375,8 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                         setIsCameraOn(false);
                     }
                 } else {
-                    if (currentUser?.userId) {
-                        updateParticipantLocally(currentUser.userId, { isCamBlocked: false });
+                    if (currentUserRef.current?.userId) {
+                        updateParticipantLocally(currentUserRef.current.userId, { isCamBlocked: false });
                     }
                     setToastMessage({ type: 'success', title: '📷 Kamera İzni Verildi', message: 'Artık kameranızı açabilirsiniz.' });
                 }
@@ -397,8 +411,8 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 setToastMessage({ type: 'success', title: '🎤 Mikrofon Alındı', message: 'Mikrofon sizde.' });
                 try {
                     const constraints: MediaStreamConstraints = {
-                        audio: selectedAudioDeviceId
-                            ? { deviceId: { exact: selectedAudioDeviceId } }
+                        audio: selectedAudioDeviceIdRef.current
+                            ? { deviceId: { exact: selectedAudioDeviceIdRef.current } }
                             : true,
                     };
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -406,7 +420,6 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                     const audioTrack = stream.getAudioTracks()[0];
                     if (audioTrack) {
                         await produceAudio(audioTrack);
-                        console.log('[Mic] Audio track produced via mediasoup (take_mic)');
                     }
                 } catch (err: any) {
                     console.error('[Mic] Failed to capture audio (take_mic):', err);
@@ -485,10 +498,18 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
         socket.on('room:moveToMeeting', onMoveToMeeting);
 
         const onUserStatusChanged = (data: { userId: string; status: string; isInvisible: boolean }) => {
-            console.log('[Status Change]', data);
+            // If user went invisible and it's NOT self → remove from list
+            const authUser = getAuthUser();
+            if (data.isInvisible && data.userId !== authUser?.userId) {
+                // Remove from participants (they are invisible to us)
+                updateParticipantLocally(data.userId, { isStealth: true, status: data.status } as any);
+            } else {
+                // Update in participants list so sidebar reflects immediately
+                updateParticipantLocally(data.userId, { status: data.status, isStealth: data.isInvisible } as any);
+            }
 
             // Update Local User State if it is me
-            if (currentUser && data.userId === currentUser.userId) {
+            if (currentUserRef.current && data.userId === currentUserRef.current.userId) {
                 setCurrentUser((prev: any) => ({
                     ...prev,
                     status: data.status,
@@ -548,6 +569,16 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
 
         socket.on('dm:receive', onDmReceive);
 
+        // Socket disconnect — mic state temizle
+        const onDisconnect = () => {
+            setIsMicOn(false);
+            setCurrentSpeaker(null);
+            setDuelSpeakers([]);
+            stopCountdown();
+            cleanupMicStream();
+        };
+        socket.on('disconnect', onDisconnect);
+
         return () => {
             socket.off('mic:acquired', onMicAcquired);
             socket.off('mic:released', onMicReleased);
@@ -567,26 +598,21 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             socket.off('room:chat-cleared', onChatCleared);
             socket.off('room:moveToMeeting', onMoveToMeeting);
             socket.off('auth:session-update', onSessionUpdate);
-            // socket.off('user-status-changed', onUserStatusChanged);
             socket.off('dm:receive', onDmReceive);
             socket.off('room:ban-lifted', onBanLifted);
             socket.off('room:user-banned', onUserBanned);
             socket.off('room:user-unbanned', onUserUnbanned);
+            socket.off('disconnect', onDisconnect);
         };
-    }, [socket, startCountdown, stopCountdown]); // Removed isCameraOn/isMicOn — now accessed via refs
+    }, [socket, startCountdown, stopCountdown, cleanupMicStream]); // cleanupMicStream is stable (useCallback with []).
 
     // Filter Logic States
     const [clearedUserIds, setClearedUserIds] = useState<Map<string, number>>(new Map());
     const [forceClearTimestamp, setForceClearTimestamp] = useState<number>(0);
     const [stopChatTimestamp, setStopChatTimestamp] = useState<number>(0); // For local stop
 
-    // Cleanup mic stream helper
-    const cleanupMicStream = useCallback(() => {
-        if (micStreamRef.current) {
-            micStreamRef.current.getTracks().forEach(t => t.stop());
-            micStreamRef.current = null;
-        }
-    }, []);
+
+    // Note: cleanupMicStream is now defined ABOVE the main useEffect (line ~152).
 
     // 3. User & Message Mapping
     const users: User[] = useMemo(() => {
@@ -605,11 +631,11 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 displayName: p.displayName,
                 avatar: (() => {
                     const av = p.avatar;
-                    if (!av) return `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(p.displayName)}&style=circle`;
+                    if (!av) return `/avatars/neutral_1.png`;
                     // GIF avatarlar sadece GodMaster'a özel
                     const isGif = av.toLowerCase().endsWith('.gif') || av.startsWith('data:image/gif');
                     if (isGif && (p.role || 'member').toLowerCase() !== 'godmaster') {
-                        return `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(p.displayName)}&style=circle`;
+                        return `/avatars/neutral_1.png`;
                     }
                     return av;
                 })(),
@@ -674,6 +700,13 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
         const user = ensureAuthUser();
         if (user) setCurrentUser(user);
     }, []);
+
+    // ─── Bonus toast (oda giriş, günlük, VIP haftalık) ───
+    useEffect(() => {
+        if (lastBonus) {
+            setToastMessage({ type: 'success', title: '🎁 Bonus', message: lastBonus.message });
+        }
+    }, [lastBonus]);
 
     // Merge static auth user with live socket participant data (for isStealth, isMuted, etc.)
     const mergedCurrentUser = useMemo(() => {
@@ -934,8 +967,15 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             if (!socket) return;
             const currentlyStealthed = mergedCurrentUser?.isStealth;
             const newStatus = currentlyStealthed ? 'online' : 'stealth';
-            // ★ localStorage'a yazma — VIP+ kullanıcılar için backend yönetiyor
-            // localStorage artık status için kullanılmıyor (buildJoinPayload'da da temizleniyor)
+            // ★ sessionStorage'a oturum-içi görünürlük tercihini kaydet
+            // Böylece oda değişikliklerinde buildJoinPayload bu tercihi kullanır
+            if (typeof window !== 'undefined') {
+                if (newStatus === 'online') {
+                    sessionStorage.setItem('soprano_session_visibility', 'online');
+                } else {
+                    sessionStorage.removeItem('soprano_session_visibility');
+                }
+            }
             // Optimistic local update for instant UI feedback
             if (mergedCurrentUser?.userId) {
                 updateParticipantLocally(mergedCurrentUser.userId, {
@@ -947,9 +987,24 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             console.log(`[toggleStealth] ${currentlyStealthed ? 'visible' : 'stealth'} → emit status:change(${newStatus})`);
         },
         changeStatus: (newStatus: string) => {
-            if (!socket) return;
+            console.log(`[changeStatus] called with status=${newStatus}, socket=${!!socket}, connected=${socket?.connected}`);
+            if (!socket) {
+                console.warn('[changeStatus] SOCKET IS NULL — cannot emit status:change');
+                return;
+            }
+            if (!socket.connected) {
+                console.warn('[changeStatus] SOCKET IS DISCONNECTED — cannot emit status:change');
+                return;
+            }
             const isStealth = newStatus === 'stealth';
-            // ★ localStorage'a yazma — VIP+ kullanıcılar için backend yönetiyor
+            // ★ sessionStorage'a oturum-içi görünürlük tercihini kaydet
+            if (typeof window !== 'undefined') {
+                if (!isStealth && newStatus !== 'stealth') {
+                    sessionStorage.setItem('soprano_session_visibility', newStatus);
+                } else {
+                    sessionStorage.removeItem('soprano_session_visibility');
+                }
+            }
             // Optimistic local update
             if (mergedCurrentUser?.userId) {
                 updateParticipantLocally(mergedCurrentUser.userId, {
@@ -958,7 +1013,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 });
             }
             socket.emit('status:change', { status: newStatus });
-            console.log(`[changeStatus] → emit status:change(${newStatus})`);
+            console.log(`[changeStatus] ✅ emitted status:change(${newStatus})`);
         },
         setGodmasterVisibility: (mode: 'hidden' | 'visible' | 'disguised', disguiseName?: string) => {
             console.log(`[setGodmasterVisibility] CALLED! mode=${mode}, socket=${!!socket}, disguiseName=${disguiseName}`);
@@ -973,7 +1028,14 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             };
             console.log(`[setGodmasterVisibility] Emitting status:change with status=${statusMap[mode]}`);
             socket.emit('status:change', { status: statusMap[mode], disguiseName });
-            // ★ localStorage'a artık GodMaster status yazma — backend yönetiyor
+            // ★ sessionStorage'a GodMaster görünürlük tercihini kaydet
+            if (typeof window !== 'undefined') {
+                if (mode === 'visible' || mode === 'disguised') {
+                    sessionStorage.setItem('soprano_session_visibility', statusMap[mode]);
+                } else {
+                    sessionStorage.removeItem('soprano_session_visibility');
+                }
+            }
             // Optimistic local update — instant visual feedback
             if (mergedCurrentUser?.userId) {
                 const optimistic: any = {
@@ -985,7 +1047,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
                 if (mode === 'disguised') {
                     const dName = disguiseName || 'Misafir';
                     optimistic.displayName = dName;
-                    optimistic.avatar = `https://api.dicebear.com/9.x/avataaars/svg?seed=${dName}`;
+                    optimistic.avatar = `/avatars/neutral_1.png`;
                 } else if (mode === 'visible') {
                     // Restore original name/avatar from currentUser
                     optimistic.displayName = mergedCurrentUser.displayName;
@@ -1120,7 +1182,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             currentUser: mergedCurrentUser,
             localStream,
             remoteStreams,
-            activeStream: null,
+            activeStream: null, // Legacy — kept for API compatibility
             isCameraOn,
             isMicOn,
             availableDevices,
@@ -1154,6 +1216,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             duplicateBlocked,
             userPermissions,
             speakingUsers,
+            actionIndicators,
         },
         actions: {
             ...actions,
@@ -1164,6 +1227,7 @@ export function useRoomRealtime({ slug }: UseRoomRealtimeProps) {
             dismissAnnouncement: () => { setAnnouncement(null); setHasNewAnnouncement(false); },
             markAnnouncementSeen: () => setHasNewAnnouncement(false),
             setDmIgnoredUserIds: (ids: Set<string>) => { dmIgnoredUserIdsRef.current = ids; },
+            setActionIndicators,
         },
         socket,
         passwordRequired,

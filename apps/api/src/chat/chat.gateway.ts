@@ -17,6 +17,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Logger, Inject, forwardRef } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
+import { FriendService } from '../friend/friend.service';
 
 /**
  * In-memory participant for real-time presence.
@@ -156,6 +157,8 @@ interface DuelState {
     origin: '*', // TODO: restrict in production
   },
   namespace: '/',
+  pingInterval: 10000,  // 10sn — ölü bağlantıları hızlı tespit et
+  pingTimeout: 5000,    // 5sn — yanıt gelmezse disconnect tetikle
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -164,6 +167,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private logger = new Logger('ChatGateway');
 
   /** In-memory participant store: socketId -> participant */
+
+  private zombieSweepInterval: NodeJS.Timeout | null = null;
   private participants = new Map<string, InMemoryParticipant>();
 
   /** Active speaker per room: roomId -> SpeakerState */
@@ -177,6 +182,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /** Microphone Queue: roomId -> userId[] */
   private micQueues = new Map<string, string[]>();
 
+  /** Debounce timers for broadcastParticipants per room */
+  private broadcastDebounce = new Map<string, NodeJS.Timeout>();
+
   /** Moderation flags: roomId -> userId -> flags (persists across reconnects) */
   private roomModerations = new Map<string, Map<string, { isMuted?: boolean; isGagged?: boolean; isCamBlocked?: boolean }>>();
 
@@ -188,6 +196,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   /** Duel reaction cooldowns: "duelId:userId" -> timestamp */
   private _duelReactionCooldowns = new Map<string, number>();
+
+  /** Room entry bonus cooldowns: userId -> last bonus timestamp (15-min cooldown) */
+  private roomEntryBonusCooldowns = new Map<string, number>();
 
   /** Helper: get or create moderation entry */
   private getModerationFlags(roomId: string, userId: string) {
@@ -239,7 +250,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /** Anti-flood tracker: socketId -> timestamp[] */
   private floodTracker = new Map<string, number[]>();
 
+  /** IP connection tracker: ip -> timestamp[] (for adminAutoHdLock) */
+  private ipConnectionTracker = new Map<string, number[]>();
+  /** Automatically HD-locked IPs: ip -> unlockTimestamp */
+  private ipAutoLocked = new Map<string, number>();
+
+  /** VM detection patterns in User-Agent */
+  private VM_UA_PATTERNS = [
+    /vmware/i, /virtualbox/i, /hyper-?v/i, /qemu/i,
+    /parallels/i, /xen/i, /bochs/i, /kvm/i,
+  ];
+
   /** Load (or return cached) tenant settings */
+  // ★ TTL Cache: tenant settings 5 dakika cache'lenir
+  private tenantSettingsExpiry = new Map<string, number>();
+  private static SETTINGS_CACHE_TTL = 5 * 60 * 1000; // 5 dakika
+
   private async loadTenantSettings(tenantId: string): Promise<any> {
     try {
       let resolvedTenantId = tenantId;
@@ -252,8 +278,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         }
       }
 
+      // ★ Cache hit — TTL dolmamışsa DB'ye gitme
+      const cached = this.tenantSettings.get(resolvedTenantId);
+      const expiry = this.tenantSettingsExpiry.get(resolvedTenantId) || 0;
+      if (cached && Date.now() < expiry) {
+        return cached;
+      }
+
       const settings = await this.adminService.getSettings(resolvedTenantId);
       this.tenantSettings.set(resolvedTenantId, settings);
+      this.tenantSettingsExpiry.set(resolvedTenantId, Date.now() + ChatGateway.SETTINGS_CACHE_TTL);
       return settings;
     } catch (e) {
       this.logger.warn(`Could not load tenant settings: ${e.message}`);
@@ -272,6 +306,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private jwtService: JwtService,
     private moduleRef: ModuleRef,
     private prisma: PrismaService,
+    private friendService: FriendService,
   ) {
     // ★ STARTUP CLEANUP — Backend restart'ta tüm aktif oturumları temizle
     // (hiçbir socket bağlı değil, eski kayıtlar hayalet kullanıcı oluşturur)
@@ -295,6 +330,37 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Gift seed
       this.seedDefaultGifts().catch(e => console.error('[GIFT] Seed error:', e));
     }, 3000);
+
+    // ★ PERIODIC ZOMBIE SWEEP — Her 60sn'de bir bağlı olmayan socket'leri temizle
+    this.zombieSweepInterval = setInterval(() => {
+      const zombieIds: string[] = [];
+      for (const [socketId, participant] of this.participants.entries()) {
+        const socket = this.server?.sockets?.sockets?.get(socketId);
+        if (!socket || !socket.connected) {
+          zombieIds.push(socketId);
+        }
+      }
+      if (zombieIds.length > 0) {
+        this.logger.warn(`[🧹 ZOMBIE SWEEP] Found ${zombieIds.length} stale participant(s), cleaning up...`);
+        const affectedRooms = new Set<string>();
+        for (const zombieId of zombieIds) {
+          const p = this.participants.get(zombieId);
+          if (p) {
+            affectedRooms.add(p.roomId);
+            this.server?.to(p.roomId).emit('room:participant-left', {
+              userId: p.userId,
+              socketId: zombieId,
+            });
+            this.logger.warn(`[🧹 ZOMBIE SWEEP] Removed: ${p.displayName} (socket ${zombieId}) from ${p.roomSlug}`);
+          }
+          this.participants.delete(zombieId);
+        }
+        // Etkilenen odaların katılımcı listesini güncelle
+        for (const roomId of affectedRooms) {
+          this.broadcastParticipants(roomId);
+        }
+      }
+    }, 60000); // 60 saniye
   }
 
   // ═══════════ Gift Seed ═══════════
@@ -757,7 +823,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // Accept both 'avatar' and 'avatarUrl' keys (frontend sends 'avatar', API sends 'avatarUrl')
         const newAvatar = data.avatarUrl ?? data.avatar;
         if (newAvatar !== undefined) {
-          participant.avatar = newAvatar || `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(participant.displayName)}&style=circle`;
+          participant.avatar = newAvatar || undefined;
         }
 
         // Update socket data
@@ -865,8 +931,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         socketId: client.id,
       });
 
-      // ★ Tam participant listesi güncellemesi — hayalet kullanıcıları önler
-      this.broadcastParticipants(participant.roomId);
+      // ★ DIRECT CALL (no debounce) — disconnect anında liste güncellenmeli
+      this._doBroadcastParticipants(participant.roomId);
 
       this.logger.log(
         `Disconnected: ${client.id} (${participant.displayName}) left ${participant.roomId}`,
@@ -987,9 +1053,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       // GodMaster visibility — depends on visibilityMode
       if (p.role?.toLowerCase() === 'godmaster') {
-        const mode = p.visibilityMode || 'hidden';
+        const mode = p.visibilityMode || 'visible';
         this.logger.log(`[getRoomParticipants] GodMaster ${p.displayName} | mode=${mode} | isStealth=${p.isStealth} | viewer=${viewerId} (${viewerRole})`);
-        if (mode === 'hidden') return; // default: always hidden
+        if (mode === 'hidden') return; // only hide when explicitly set
         // 'visible' or 'disguised' → show to everyone, skip stealth check
         result.push(p);
         return;
@@ -997,6 +1063,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       // If participant is stealth...
       if (p.isStealth) {
+        this.logger.log(`[getRoomParticipants] STEALTH FILTER: ${p.displayName} (role=${p.role}, stealth=${p.isStealth}) hidden from ${viewerId} (${viewerRole})`);
         // If viewer has no role (guest), definitely hide
         if (!viewerRole) return;
 
@@ -1052,17 +1119,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (joinerRole !== 'godmaster' && banBlockEnabled) {
       try {
-        // Layer 1: Check user ID ban — applies to ALL roles (except GodMaster)
-        const activeBan = await this.adminService.checkActiveBan(user.sub);
+        // ★ PARALLEL: Both ban checks run simultaneously
+        const joinerLevel = getRoleLevel(joinerRole);
+        const needsIpCheck = joinerLevel < ROLE_HIERARCHY['admin'];
+        const [activeBan, ipBan] = await Promise.all([
+          this.adminService.checkActiveBan(user.sub),
+          needsIpCheck ? this.adminService.checkActiveIpBan(clientIp, user.tenantId) : Promise.resolve(null),
+        ]);
+
+        // Layer 1: Check user ID ban
         if (activeBan) {
           const expiresAtStr = activeBan.expiresAt?.toISOString() || null;
           const remainingMs = activeBan.expiresAt
             ? activeBan.expiresAt.getTime() - Date.now()
             : Infinity; // permanent
-          // ★ ONLY PERMANENT BANS are hard bans (block entry)
-          // 1 day, 1 week, 1 month → soft ban (user stays connected with restrictions)
           if (remainingMs === Infinity) {
-            // ★ HARD BAN — Kalıcı ban → tam engel
             this.logger.warn(`[HARD BAN] ${user.sub} (role=${joinerRole}) blocked from room ${roomId}`);
             client.emit('room:banned', {
               reason: activeBan.reason || 'Yasaklısınız.',
@@ -1072,31 +1143,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
             client.disconnect(true);
             return;
           } else {
-            // ★ SOFT BAN — < 1 hafta → giriş var ama kısıtlı
             this.logger.warn(`[SOFT BAN] ${user.sub} (role=${joinerRole}) allowed in room ${roomId} with restrictions (${Math.ceil(remainingMs / 3600000)}h left)`);
             softBanInfo = {
               reason: activeBan.reason || 'Geçici yasak.',
               expiresAt: expiresAtStr,
             };
-            // Don't disconnect — let them join with restrictions
           }
         }
 
-        // Layer 2: Check IP ban — only for non-staff roles (admin+ are immune to IP bans)
-        const joinerLevel = getRoleLevel(joinerRole);
-        if (joinerLevel < ROLE_HIERARCHY['admin']) {
-          const ipBan = await this.adminService.checkActiveIpBan(clientIp, user.tenantId);
-          if (ipBan) {
-            this.logger.warn(`[IP BAN CHECK] IP ${clientIp} is banned, blocking user ${user.sub}`);
-            client.emit('room:banned', {
-              reason: ipBan.reason || 'IP adresiniz yasaklanmış.',
-              expiresAt: null,
-              banLevel: 'hard',
-            });
-            client.disconnect(true);
-            return;
-          }
-        } else {
+        // Layer 2: Check IP ban
+        if (ipBan) {
+          this.logger.warn(`[IP BAN CHECK] IP ${clientIp} is banned, blocking user ${user.sub}`);
+          client.emit('room:banned', {
+            reason: ipBan.reason || 'IP adresiniz yasaklanmış.',
+            expiresAt: null,
+            banLevel: 'hard',
+          });
+          client.disconnect(true);
+          return;
+        } else if (!needsIpCheck) {
           this.logger.log(`[BAN CHECK] IP ban check skipped for staff user ${user.sub} (role=${joinerRole})`);
         }
       } catch (e) {
@@ -1209,26 +1274,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Store participant in memory
     const userRoleLevel = getRoleLevel(user.role || 'guest');
 
-    // ★ Tüm yöneticiler (VIP+) varsayılan olarak GÖRÜNMEZ girer
-    // Hiyerarşi getRoomParticipants'ta korunur: üst rol alttakini görür
+    // ★ Sadece GodMaster varsayılan olarak GÖRÜNMEZ girer
+    // Owner ve diğer VIP+ roller ÇEVRİMİÇİ olarak başlar
     // GodMaster varsayılan olarak GÖRÜNMEZ girer (hidden mode)
     const hasStealthPermission = user.permissions?.['self.stealth'] === true;
     const isGodMasterRole = (user.role || 'guest').toLowerCase() === 'godmaster';
-    // ★ VIP+ ve GodMaster kullanıcılar HER GİRİŞTE varsayılan stealth ile başlar
-    // Frontend'den gelen initialStatus payload'ı tamamen göz ardı edilir
-    // Kullanıcı odaya girdikten sonra manuel olarak görünür olabilir (status:change ile)
-    let initialStealth = isGodMasterRole ? true : (hasStealthPermission || userRoleLevel >= VIP_LEVEL);
+    // ★ GodMaster artık görünür olarak başlar — isterse dropdown'dan gizli moda geçebilir
+    let initialStealth = false;
     let initialVisibilityMode: 'hidden' | 'visible' | 'disguised' | undefined = undefined;
     let initialDisguiseName: string | undefined = undefined;
 
-    if (initialStealth) {
-      // ★ VIP+ / GodMaster → payload ne olursa olsun stealth ile başla
-      if (isGodMasterRole) {
-        initialVisibilityMode = 'hidden';
-      }
-      // initialStatus payload'ı göz ardı edilir — stealth korunur
+    if (isGodMasterRole) {
+      // GodMaster: varsayılan görünür, stealth değil
+      initialVisibilityMode = 'visible';
     } else if (payload.initialStatus) {
-      // ★ Sadece VIP altı kullanıcılar initialStatus payload'ını kullanabilir
+      // ★ VIP altı kullanıcılar initialStatus payload'ını kullanabilir
       if (payload.initialStatus === 'stealth') {
         if (hasStealthPermission) {
           initialStealth = true;
@@ -1241,36 +1301,48 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       `[Stealth Debug] User: ${user.username} | Role: ${user.role} | Level: ${userRoleLevel} | VIP_LEVEL: ${VIP_LEVEL} | InitialStealth: ${initialStealth} | Requested: ${payload.initialStatus} | IGNORED_PAYLOAD: ${initialStealth}`
     );
 
-    // Refresh role and profile from DB for non-guest users
-    if (user.sub && !user.sub.startsWith('guest_')) {
+    // ★ DEFERRED DB REFRESH — join sonrasında async olarak güncellenir (join'i bloklamaz)
+    // JWT'deki mevcut rol/profil kullanılır, DB refresh arka planda yapılır
+    const deferredDbRefresh = async () => {
+      if (!user.sub || user.sub.startsWith('guest_')) return;
       try {
-        const prisma = this.moduleRef.get(PrismaService, { strict: false });
-        if (prisma) {
-          const dbUser = await prisma.user.findUnique({
-            where: { id: user.sub },
-            select: { role: true, permissions: true, avatarUrl: true, profilePicture: true, displayName: true, nameColor: true },
-          });
-          if (dbUser) {
-            const oldRole = user.role;
-            user.role = dbUser.role || user.role;
-            user.permissions = dbUser.permissions || user.permissions;
-            if (dbUser.avatarUrl) user.avatar = dbUser.avatarUrl;
-            if (dbUser.profilePicture) {
-              user.profilePicture = dbUser.profilePicture;
-            } else if (dbUser.avatarUrl && !dbUser.avatarUrl.startsWith('animated:') && !dbUser.avatarUrl.startsWith('gifnick:')) {
-              user.profilePicture = dbUser.avatarUrl;
+        const dbUser = await this.prisma.user.findUnique({
+          where: { id: user.sub },
+          select: { role: true, permissions: true, avatarUrl: true, profilePicture: true, displayName: true, nameColor: true },
+        });
+        if (dbUser) {
+          let changed = false;
+          const p = this.participants.get(client.id);
+          if (!p) return; // Already disconnected
+
+          if (dbUser.role && dbUser.role !== p.role) { p.role = dbUser.role; changed = true; }
+          if (dbUser.permissions) { user.permissions = dbUser.permissions as any; p.permissions = dbUser.permissions as any; }
+          if (dbUser.avatarUrl && dbUser.avatarUrl !== p.avatar) { p.avatar = dbUser.avatarUrl; changed = true; }
+
+          // Resolve profilePicture
+          let resolvedPic = dbUser.profilePicture;
+          if (!resolvedPic && dbUser.avatarUrl && !dbUser.avatarUrl.startsWith('animated:') && !dbUser.avatarUrl.startsWith('gifnick:')) {
+            resolvedPic = dbUser.avatarUrl;
+          }
+          if (resolvedPic) {
+            user.profilePicture = resolvedPic;
+            if (p.profilePicture !== resolvedPic) {
+              p.profilePicture = resolvedPic;
+              changed = true;
             }
-            if (dbUser.displayName) { user.displayName = dbUser.displayName; user.username = dbUser.displayName; }
-            if (dbUser.nameColor) user.nameColor = dbUser.nameColor;
-            if (oldRole !== user.role) {
-              this.logger.log(`[DB Refresh] ${user.displayName || user.username}: ${oldRole} → ${user.role}`);
-            }
+          }
+
+          if (dbUser.displayName && dbUser.displayName !== p.displayName) { p.displayName = dbUser.displayName; changed = true; }
+          if (dbUser.nameColor) { p.nameColor = dbUser.nameColor; changed = true; }
+
+          if (changed) {
+            this._doBroadcastParticipants(p.roomId);
           }
         }
       } catch (e) {
-        this.logger.warn(`[DB Refresh] ${user.sub}: ${e.message}`);
+        this.logger.warn(`[Deferred DB Refresh] ${user.sub}: ${e.message}`);
       }
-    }
+    };
 
     // Restore temp role if user has an active one for this room
     const tempKey = `${user.sub}:${scopedRoom}`;
@@ -1287,7 +1359,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       avatar:
         user.avatar ||
         payload.avatar ||
-        `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(user.username)}&style=circle`,
+        undefined,
       profilePicture:
         user.profilePicture ||
         payload.profilePicture ||
@@ -1300,7 +1372,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       isStealth: initialStealth,
       status: initialStealth ? 'stealth' : 'online',
       nameColor: user.nameColor || undefined,
-      visibilityMode: isGodMasterRole ? (initialVisibilityMode || this.godmasterVisibility.get(user.sub) || 'hidden') : undefined,
+      visibilityMode: isGodMasterRole ? (initialVisibilityMode || this.godmasterVisibility.get(user.sub) || 'visible') : undefined,
       disguisedName: initialDisguiseName,
       godmasterIcon: isGodMasterRole ? (payload.godmasterIcon || undefined) : undefined,
       permissions: user.permissions || undefined,
@@ -1341,6 +1413,53 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
         this.broadcastParticipants(zombieParticipant.roomId);
         this.participants.delete(zombieId);
+      }
+    }
+
+    // ─── ADMIN AUTO HD LOCK ─────────────────────────────────
+    // Aynı IP'den 1 saat içinde 20+ bağlantı olursa otomatik 24 saat engelleme
+    // ★ Localhost IP'leri muaf (geliştirme ortamı koruması)
+    const isLocalhostIp = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
+    if (sysSettings?.adminAutoHdLock !== false && joinerRole !== 'godmaster' && !isLocalhostIp) {
+      // Önce mevcut kilidi kontrol et
+      const lockExpiry = this.ipAutoLocked.get(clientIp);
+      if (lockExpiry && Date.now() < lockExpiry) {
+        this.logger.warn(`[AUTO-HD-LOCK] IP ${clientIp} auto-locked until ${new Date(lockExpiry).toISOString()}`);
+        client.emit('room:error', { message: 'Bu cihazdan çok fazla bağlantı yapıldı. Lütfen daha sonra tekrar deneyin.' });
+        client.disconnect(true);
+        return;
+      } else if (lockExpiry) {
+        this.ipAutoLocked.delete(clientIp); // Süre dolmuş, temizle
+      }
+
+      // Bağlantı sayacını güncelle
+      const now = Date.now();
+      const windowMs = 60 * 60 * 1000; // 1 saat
+      const attempts = (this.ipConnectionTracker.get(clientIp) || []).filter(t => now - t < windowMs);
+      attempts.push(now);
+      this.ipConnectionTracker.set(clientIp, attempts);
+
+      if (attempts.length >= 20) {
+        const lockDuration = 24 * 60 * 60 * 1000; // 24 saat
+        this.ipAutoLocked.set(clientIp, now + lockDuration);
+        this.ipConnectionTracker.delete(clientIp); // Sayacı sıfırla
+        this.logger.warn(`[AUTO-HD-LOCK] IP ${clientIp} locked for 24h after ${attempts.length} connections in 1h`);
+        client.emit('room:error', { message: 'Çok fazla bağlantı denemesi tespit edildi. 24 saat süreyle engellendiniz.' });
+        client.disconnect(true);
+        return;
+      }
+    }
+
+    // ─── VIRTUAL MACHINE BLOCK ──────────────────────────────
+    // Client User-Agent'ında VM kalıpları tespit edilirse bağlantıyı reddet
+    if (sysSettings?.blockVirtualMachine && joinerRole !== 'godmaster') {
+      const userAgent = client.handshake.headers['user-agent'] || '';
+      const isVM = this.VM_UA_PATTERNS.some(p => p.test(userAgent));
+      if (isVM) {
+        this.logger.warn(`[VM-BLOCK] Virtual machine detected for ${user.sub}: ${userAgent.substring(0, 100)}`);
+        client.emit('room:error', { message: 'Sanal makine kullanımı tespit edildi. Bu platform sanal makinelerden erişime kapalıdır.' });
+        client.disconnect(true);
+        return;
       }
     }
 
@@ -1455,77 +1574,62 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     // Send room data back to the joining client
-    // Use client.emit (not return) for compatibility with socket.on('room:joined')
-    let messages: any[] = [];
-    try {
-      messages = await this.chatService.getMessages(roomId);
-      messages = messages.reverse();
-    } catch (e) {
-      // Room may not exist in DB yet — that's fine, empty messages
-      this.logger.warn(
-        `Could not load messages for room "${roomId}": ${e.message}`,
-      );
-      messages = [];
-    }
-
-    // Fetch room list + theme settings for the joining client
-    let allRooms: any[] = [];
-    let themeSettings: any = null;
-    // İn-memory participant sayılarını hesapla (DB'deki stale kayıtlar yerine)
+    // ★ PERFORMANCE: All DB queries run in PARALLEL (not sequential)
     const inMemoryCounts: Record<string, number> = {};
     this.participants.forEach(p => {
       if (p.tenantId === tenantId) {
         inMemoryCounts[p.roomSlug] = (inMemoryCounts[p.roomSlug] || 0) + 1;
       }
     });
-    try {
-      const dbRooms = await this.roomService.findAll(user.tenantId);
-      allRooms = dbRooms.map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        slug: r.slug,
-        status: r.status,
-        isLocked: r.isLocked,
-        isVipRoom: r.isVipRoom,
-        isMeetingRoom: r.isMeetingRoom,
-        participantCount: inMemoryCounts[r.slug] || 0,
-        buttonColor: r.buttonColor || null,
-      }));
-    } catch (e) {
-      this.logger.warn(`Could not load rooms for tenant: ${e.message}`);
-    }
 
-    try {
-      themeSettings = await this.adminService.getSettings(user.tenantId);
-    } catch (e) {
-      this.logger.warn(`Could not load theme settings: ${e.message}`);
-    }
-
-    // Fetch current room settings (announcement, etc.) for joining client
-    let currentRoomSettings: any = null;
-    try {
-      const currentRoom = await this.roomService.findBySlug(user.tenantId, roomId);
-      if (currentRoom) {
-        currentRoomSettings = {
-          roomId: currentRoom.id,
-          name: currentRoom.name,
+    const [messagesResult, roomsResult, themeResult, roomSettingsResult] = await Promise.all([
+      // 1) Messages
+      this.chatService.getMessages(roomId).then(m => m.reverse()).catch(e => {
+        this.logger.warn(`Could not load messages for room "${roomId}": ${e.message}`);
+        return [] as any[];
+      }),
+      // 2) Room list
+      this.roomService.findAll(user.tenantId).then(dbRooms =>
+        dbRooms.map((r: any) => ({
+          id: r.id, name: r.name, slug: r.slug, status: r.status,
+          isLocked: r.isLocked, isVipRoom: r.isVipRoom, isMeetingRoom: r.isMeetingRoom,
+          participantCount: inMemoryCounts[r.slug] || 0,
+          buttonColor: r.buttonColor || null,
+        }))
+      ).catch(e => {
+        this.logger.warn(`Could not load rooms for tenant: ${e.message}`);
+        return [] as any[];
+      }),
+      // 3) Theme settings
+      this.adminService.getSettings(user.tenantId).catch(e => {
+        this.logger.warn(`Could not load theme settings: ${e.message}`);
+        return null;
+      }),
+      // 4) Current room settings
+      this.roomService.findBySlug(user.tenantId, roomId).then(currentRoom => {
+        if (!currentRoom) return null;
+        return {
+          roomId: currentRoom.id, name: currentRoom.name,
           announcement: currentRoom.announcement || null,
-          isLocked: currentRoom.isLocked,
-          isPublic: currentRoom.isPublic,
-          isVipRoom: currentRoom.isVipRoom,
-          isMeetingRoom: currentRoom.isMeetingRoom,
+          isLocked: currentRoom.isLocked, isPublic: currentRoom.isPublic,
+          isVipRoom: currentRoom.isVipRoom, isMeetingRoom: currentRoom.isMeetingRoom,
           isCameraAllowed: currentRoom.isCameraAllowed,
           maxParticipants: currentRoom.maxParticipants,
-          micLimit: currentRoom.micLimit,
-          cameraLimit: currentRoom.cameraLimit,
+          micLimit: currentRoom.micLimit, cameraLimit: currentRoom.cameraLimit,
           hasPassword: !!(currentRoom.password && currentRoom.password.trim()),
           themeId: currentRoom.themeId || null,
           metadata: currentRoom.metadata || null,
         };
-      }
-    } catch (e) {
-      this.logger.warn(`Could not load room settings: ${e.message}`);
-    }
+      }).catch(e => {
+        this.logger.warn(`Could not load room settings: ${e.message}`);
+        return null;
+      }),
+    ]);
+
+    const messages = messagesResult;
+    const allRooms = roomsResult;
+    const themeSettings = themeResult;
+    const currentRoomSettings = roomSettingsResult;
 
     client.emit('room:joined', {
       messages,
@@ -1543,7 +1647,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           id: p.socketId,
           userId: p.userId,
           displayName: (showDisguisedAppearance || showDisguisedRole) ? (p.disguisedName || 'Misafir') : p.displayName,
-          avatar: (showDisguisedAppearance || showDisguisedRole) ? `https://api.dicebear.com/9.x/avataaars/svg?seed=${p.disguisedName || 'guest'}` : p.avatar,
+          avatar: (showDisguisedAppearance || showDisguisedRole) ? `/avatars/neutral_1.png` : p.avatar,
           role: showDisguisedRole ? 'guest' : p.role,
           socketId: p.socketId,
           isMuted: p.isMuted,
@@ -1572,6 +1676,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       })() : null,
       userPermissions: user.permissions || null,
     });
+
+    // ★ BROADCAST: Yeni katılan dahil tüm odadaki kullanıcılara güncel listeyi gönder
+    this._doBroadcastParticipants(scopedRoom);
+
+    // ★ FIRE-AND-FORGET: DB profil güncellemesi (join'i bloklamaz)
+    deferredDbRefresh();
 
     // ★ TV YOUTUBE SYNC — Aktif YouTube yayını varsa yeni katılana gönder
     const activeYoutube = this.roomYoutubeUrls.get(scopedRoom);
@@ -1607,16 +1717,57 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     // ─── WELCOME MESSAGE ──────────────────────────────────────
-    if (sysSettings?.welcomeMessage) {
-      client.emit('chat:message', {
-        id: `sys_welcome_${Date.now()}`,
-        content: sysSettings.welcomeMessage,
-        sender: 'system',
-        senderName: '🎉 Sistem',
-        senderAvatar: null,
-        type: 'SYSTEM',
-        createdAt: new Date().toISOString(),
-      });
+    // Frontend banner zaten welcomeMessage gösteriyor, çift mesaj olmasın
+    // if (sysSettings?.welcomeMessage) {
+    //   client.emit('chat:message', {
+    //     id: `sys_welcome_${Date.now()}`,
+    //     content: sysSettings.welcomeMessage,
+    //     sender: 'system',
+    //     senderName: '🎉 Sistem',
+    //     senderAvatar: null,
+    //     type: 'SYSTEM',
+    //     createdAt: new Date().toISOString(),
+    //   });
+    // }
+
+    // ─── ODA GİRİŞ PUANI (Room Entry Points) ──────────────────
+    // Her odaya girişte +5 puan, 15 dakika cooldown ile
+    if (user.sub && !user.sub.startsWith('guest_')) {
+      try {
+        const now = Date.now();
+        const COOLDOWN_MS = 15 * 60 * 1000; // 15 dakika
+        const ENTRY_POINTS = 5;
+        const lastBonus = this.roomEntryBonusCooldowns.get(user.sub) || 0;
+
+        if (now - lastBonus >= COOLDOWN_MS) {
+          this.roomEntryBonusCooldowns.set(user.sub, now);
+
+          await this.prisma.user.update({
+            where: { id: user.sub },
+            data: { points: { increment: ENTRY_POINTS } },
+          });
+
+          const updatedUserPts = await this.prisma.user.findUnique({
+            where: { id: user.sub },
+            select: { balance: true, points: true },
+          });
+
+          client.emit('gift:balance', {
+            balance: Number(updatedUserPts?.balance || 0),
+            points: updatedUserPts?.points || 0,
+          });
+
+          client.emit('dailyBonus:received', {
+            amount: ENTRY_POINTS,
+            type: 'roomEntry',
+            message: `🎁 Odaya giriş bonusu: +${ENTRY_POINTS} puan kazandınız!`,
+          });
+
+          this.logger.log(`[ROOM ENTRY BONUS] ${participant.displayName}: +${ENTRY_POINTS} puan`);
+        }
+      } catch (e) {
+        this.logger.warn(`[ROOM ENTRY BONUS] Error for ${user.sub}: ${e.message}`);
+      }
     }
 
     // ★ DUEL SYNC — Aktif düello varsa yeni katılana gönder (pending hariç)
@@ -1660,7 +1811,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Broadcast full participant list to ALL existing users in the room
     // so everyone instantly sees the newly joined user (with proper role-based filtering)
     // ★ CRITICAL: Use scopedRoom (tenant:slug) not raw roomId (slug) — participants use scoped IDs
-    this.broadcastParticipants(scopedRoom);
+    // ★ DIRECT CALL (no debounce) — join sırasında debounce timing sorunu yaratıyor,
+    //   diğer kullanıcılar yeni katılanı göremiyordu
+    const adapterRoom = this.server?.sockets?.adapter?.rooms?.get(scopedRoom);
+    this.logger.log(
+      `[JOIN BROADCAST] scopedRoom=${scopedRoom} | adapterRoom.size=${adapterRoom?.size || 0} | participantsInRoom=${Array.from(this.participants.values()).filter(p => p.roomId === scopedRoom).length}`,
+    );
+    this._doBroadcastParticipants(scopedRoom);
+
+    // ★ SAFETY RETRY — 300ms sonra tekrar broadcast (race condition'ları yakalar)
+    setTimeout(() => {
+      if (this.participants.has(client.id)) {
+        this._doBroadcastParticipants(scopedRoom);
+      }
+    }, 300);
 
     // Broadcast updated room counts to all tenant clients
     if (user?.tenantId) {
@@ -1893,9 +2057,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const broadcastTarget = sender?.roomId || payload.roomId;
     this.server.to(broadcastTarget).emit('chat:message', {
       ...message,
-      senderName: user.displayName || user.username,
-      senderAvatar: user.avatar || null,
-      senderNameColor: (user as any).nameColor || null,
+      senderName: sender?.displayName || user.displayName || user.username,
+      senderAvatar: sender?.avatar || user.avatar || null,
+      senderNameColor: sender?.nameColor || (user as any).nameColor || null,
     });
   }
 
@@ -1940,6 +2104,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() payload: { status: string; disguiseName?: string },
   ) {
     const participant = this.participants.get(client.id);
+    this.logger.log(`[status:change] socket=${client.id} | status=${payload.status} | participant=${participant ? participant.displayName : 'NOT FOUND'}`);
     if (!participant) return;
 
     const newStatus = payload.status;
@@ -1975,10 +2140,43 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.logger.log(`[GodMaster] ${participant.displayName} → HIDDEN`);
       }
 
-      this.server.to(participant.roomId).emit('user-status-changed', {
-        userId: participant.userId,
-        status: participant.status,
-        isInvisible: participant.visibilityMode === 'hidden',
+      // ★ Role-aware broadcast: hidden/visible geçişleri anlık yansıtılır
+      this.participants.forEach((viewer, socketId) => {
+        if (viewer.roomId !== participant.roomId) return;
+        const isSelf = viewer.userId === participant.userId;
+        const isViewerGodMaster = viewer.role?.toLowerCase() === 'godmaster';
+
+        if (isSelf || isViewerGodMaster) {
+          // Self ve GodMaster: tam status update
+          this.server.to(socketId).emit('user-status-changed', {
+            userId: participant.userId,
+            status: participant.status,
+            isInvisible: participant.visibilityMode === 'hidden',
+          });
+        } else if (participant.visibilityMode === 'hidden') {
+          // Gizli moda geçiş: düşük seviye kullanıcılar → anında kaldır
+          this.server.to(socketId).emit('room:participant-left', {
+            userId: participant.userId,
+            socketId: participant.socketId,
+          });
+        } else {
+          // Görünür/disguised moda geçiş: düşük seviye kullanıcılar → anında ekle
+          this.server.to(socketId).emit('room:participant-joined', {
+            userId: participant.userId,
+            displayName: participant.visibilityMode === 'disguised'
+              ? (participant.disguisedName || 'Misafir')
+              : participant.displayName,
+            avatar: participant.visibilityMode === 'disguised'
+              ? `https://api.dicebear.com/9.x/avataaars/svg?seed=${participant.disguisedName || 'guest'}`
+              : participant.avatar,
+            role: participant.visibilityMode === 'disguised' ? 'guest' : participant.role,
+            socketId: participant.socketId,
+            isStealth: false,
+            status: participant.status,
+            nameColor: participant.visibilityMode === 'disguised' ? undefined : participant.nameColor,
+            platform: participant.platform || 'web',
+          });
+        }
       });
       this.broadcastParticipants(participant.roomId);
       return;
@@ -2004,11 +2202,43 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       `${participant.displayName} changed status to ${newStatus} (stealth=${isStealth})`,
     );
 
-    // Broadcast specific status event
-    this.server.to(participant.roomId).emit('user-status-changed', {
-      userId: participant.userId,
-      status: newStatus,
-      isInvisible: isStealth
+    // ★ Role-aware broadcast: stealth → düşük seviye kullanıcılara 'participant-left' gönder
+    const targetLevel = getRoleLevel(participant.role);
+    this.participants.forEach((viewer, socketId) => {
+      if (viewer.roomId !== participant.roomId) return;
+      const viewerLevel = getRoleLevel(viewer.role);
+      const isSelf = viewer.userId === participant.userId;
+      const isViewerGodMaster = viewer.role?.toLowerCase() === 'godmaster';
+
+      if (isSelf || isViewerGodMaster || viewerLevel >= targetLevel) {
+        // Self, GodMaster ve eşit/üst seviye roller: status update gönder
+        this.server.to(socketId).emit('user-status-changed', {
+          userId: participant.userId,
+          status: newStatus,
+          isInvisible: isStealth,
+        });
+      } else if (isStealth) {
+        // Düşük seviye kullanıcılar: stealth olduğunda anında 'left' sinyali
+        this.server.to(socketId).emit('room:participant-left', {
+          userId: participant.userId,
+          socketId: participant.socketId,
+        });
+        this.logger.log(`[stealth] Sent participant-left to ${viewer.displayName} for ${participant.displayName}`);
+      } else {
+        // Stealth'ten çıkış: participant-joined sinyali
+        this.server.to(socketId).emit('room:participant-joined', {
+          userId: participant.userId,
+          displayName: participant.displayName,
+          avatar: participant.avatar,
+          role: participant.role,
+          socketId: participant.socketId,
+          isStealth: false,
+          status: newStatus,
+          nameColor: participant.nameColor,
+          platform: participant.platform || 'web',
+        });
+        this.logger.log(`[stealth] Sent participant-joined to ${viewer.displayName} for ${participant.displayName}`);
+      }
     });
 
     // Re-broadcast participant list to everyone in the room
@@ -2323,6 +2553,36 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     if (!target) {
+      // ★ SPECIAL CASE: Unban can work even if the user is disconnected (hard-banned users are kicked)
+      if (payload.action === 'unban') {
+        try {
+          await this.adminService.removeAllActiveBansForUser(
+            actor.userId,
+            payload.targetUserId,
+            actor.tenantId,
+            client.handshake.address,
+          );
+          // Broadcast to room so sidebar updates
+          this.server.to(actor.roomId).emit('room:user-unbanned', {
+            userId: payload.targetUserId,
+          });
+          this.server.to(actor.roomId).emit('room:notification', {
+            type: 'info',
+            message: 'Yasak kaldırıldı.',
+          });
+          client.emit('room:toast', {
+            type: 'success',
+            title: 'Yasak Kaldırıldı',
+            message: 'Kullanıcının yasağı başarıyla kaldırıldı.',
+          });
+          this.logger.log(`[UNBAN-OFFLINE] ${actor.displayName} unbanned offline user ${payload.targetUserId}`);
+          this._doBroadcastParticipants(actor.roomId);
+        } catch (e) {
+          this.logger.error(`Failed to unban offline user: ${e.message}`);
+          client.emit('room:error', { message: 'Yasak kaldırma başarısız oldu.' });
+        }
+        return;
+      }
       client.emit('room:error', { message: 'Target user not found' });
       return;
     }
@@ -2388,7 +2648,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           targetSocketKick.disconnect(true);
         }
         this.participants.delete(target.socketId);
-        this.broadcastParticipants(target.roomId);
+        this._doBroadcastParticipants(target.roomId);
+        // ★ Oda genelinde bildirim — herkes görsün
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: 'warning',
+          icon: '👢',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: 'kick',
+          message: `${actor.displayName}, ${target.displayName} kullanıcısını odadan attı.`,
+        });
         this.logger.log(`[KICK] ${actor.displayName} kicked ${target.displayName}`);
         break;
       }
@@ -2424,7 +2695,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           targetSocketHardKick.disconnect(true);
         }
         this.participants.delete(target.socketId);
-        this.broadcastParticipants(target.roomId);
+        this._doBroadcastParticipants(target.roomId);
+        // ★ Oda genelinde bildirim
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: 'danger',
+          icon: '⛔',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: 'hard_kick',
+          message: `${actor.displayName}, ${target.displayName} kullanıcısını zorla attı.`,
+        });
         break;
       }
 
@@ -2461,7 +2743,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           }
         }
 
-        this.broadcastParticipants(target.roomId);
+        this._doBroadcastParticipants(target.roomId);
+        // ★ Oda genelinde bildirim
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: target.isMuted ? 'danger' : 'success',
+          icon: target.isMuted ? '🔇' : '🔊',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: target.isMuted ? 'mute' : 'unmute',
+          message: target.isMuted
+            ? `${actor.displayName}, ${target.displayName} kullanıcısını susturdu.`
+            : `${actor.displayName}, ${target.displayName} kullanıcısının sesini açtı.`,
+        });
         break;
       }
 
@@ -2475,7 +2770,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           .to(target.socketId)
           .emit('room:moderation', { action: 'gag', isGagged: target.isGagged });
 
-        this.broadcastParticipants(target.roomId);
+        this._doBroadcastParticipants(target.roomId);
+        // ★ Oda genelinde bildirim
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: target.isGagged ? 'warning' : 'success',
+          icon: target.isGagged ? '🤐' : '💬',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: target.isGagged ? 'gag' : 'ungag',
+          message: target.isGagged
+            ? `${actor.displayName}, ${target.displayName} kullanıcısına yazı yasağı verdi.`
+            : `${actor.displayName}, ${target.displayName} kullanıcısının yazı yasağını kaldırdı.`,
+        });
         break;
       }
 
@@ -2489,7 +2797,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           .to(target.socketId)
           .emit('room:moderation', { action: 'cam_block', isCamBlocked: target.isCamBlocked });
 
-        this.broadcastParticipants(target.roomId);
+        this._doBroadcastParticipants(target.roomId);
+        // ★ Oda genelinde bildirim
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: target.isCamBlocked ? 'cyan' : 'success',
+          icon: target.isCamBlocked ? '📷' : '📹',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: target.isCamBlocked ? 'cam_block' : 'cam_unblock',
+          message: target.isCamBlocked
+            ? `${actor.displayName}, ${target.displayName} kullanıcısının kamerasını engelledi.`
+            : `${actor.displayName}, ${target.displayName} kullanıcısının kamera iznini açtı.`,
+        });
         break;
       }
 
@@ -2497,6 +2818,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.server
           .to(target.socketId)
           .emit('room:moderation', { action: 'exit_browser' });
+        // ★ Oda genelinde bildirim
+        this.server.to(target.roomId).emit('room:action-notify', {
+          type: 'danger',
+          icon: '🖥️',
+          actor: actor.displayName,
+          actorUserId: actor.userId,
+          target: target.displayName,
+          targetUserId: target.userId,
+          action: 'exit_browser',
+          message: `${actor.displayName}, ${target.displayName} kullanıcısının tarayıcısını kapattı.`,
+        });
         break;
       }
 
@@ -2784,8 +3116,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
             userId: target.userId,
             displayName: target.displayName,
           });
+          // ★ Oda genelinde bildirim
+          this.server.to(target.roomId).emit('room:action-notify', {
+            type: 'success',
+            icon: '✅',
+            actor: actor.displayName,
+            actorUserId: actor.userId,
+            target: target.displayName,
+            targetUserId: target.userId,
+            action: 'unban',
+            message: `${actor.displayName}, ${target.displayName} kullanıcısının yasağını kaldırdı.`,
+          });
 
-          this.broadcastParticipants(target.roomId);
+          this._doBroadcastParticipants(target.roomId);
         } catch (e) {
           this.logger.error(
             `Failed to unban user ${target.userId}: ${e.message}`,
@@ -3953,23 +4296,39 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return { socketId: undefined, participant: undefined };
   }
 
-  /** Broadcasts an updated participant list to each socket in a room, filtered by their role */
+  /** Broadcasts an updated participant list to each socket in a room, filtered by their role.
+   *  Debounced: if called multiple times for the same room within 200ms, only the last call executes. */
   private broadcastParticipants(roomId: string) {
-    let socketIds: Set<string>;
+    // Clear existing debounce timer for this room
+    const existing = this.broadcastDebounce.get(roomId);
+    if (existing) clearTimeout(existing);
 
-    const room = this.server?.sockets?.adapter?.rooms?.get(roomId);
-    if (room && room.size > 0) {
-      socketIds = room;
-      this.logger.log(`[broadcastParticipants] Using adapter room: ${room.size} sockets in ${roomId}`);
-    } else {
-      // Fallback: iterate participants map to find sockets in this room
-      socketIds = new Set<string>();
-      this.participants.forEach((p, sid) => {
-        if (p.roomId === roomId) socketIds.add(sid);
-      });
-      this.logger.log(`[broadcastParticipants] Adapter room not found, fallback: ${socketIds.size} sockets in ${roomId}`);
-      if (socketIds.size === 0) return;
+    // Schedule broadcast with 50ms debounce (fast enough for near-instant updates)
+    const timer = setTimeout(() => {
+      this.broadcastDebounce.delete(roomId);
+      this._doBroadcastParticipants(roomId);
+    }, 50);
+    this.broadcastDebounce.set(roomId, timer);
+  }
+
+  /** Actual broadcast implementation (called by debounced wrapper) */
+  private _doBroadcastParticipants(roomId: string) {
+    // ★ UNION: Combine adapter room AND participants map to ensure NO socket is missed
+    const socketIds = new Set<string>();
+
+    // Source 1: Socket.IO adapter room
+    const adapterRoom = this.server?.sockets?.adapter?.rooms?.get(roomId);
+    if (adapterRoom) {
+      for (const sid of adapterRoom) socketIds.add(sid);
     }
+
+    // Source 2: In-memory participants map (catches sockets not yet in adapter room)
+    this.participants.forEach((p, sid) => {
+      if (p.roomId === roomId) socketIds.add(sid);
+    });
+
+    this.logger.log(`[broadcastParticipants] roomId=${roomId} | sockets=${socketIds.size} | adapter=${adapterRoom?.size || 0}`);
+    if (socketIds.size === 0) return;
 
     for (const socketId of socketIds) {
       const viewer = this.participants.get(socketId);
@@ -3995,7 +4354,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return {
           userId: p.userId,
           displayName: (showDisguisedAppearance || showDisguisedRole) ? (p.disguisedName || 'Misafir') : p.displayName,
-          avatar: (showDisguisedAppearance || showDisguisedRole) ? `https://api.dicebear.com/9.x/avataaars/svg?seed=${p.disguisedName || 'guest'}` : p.avatar,
+          avatar: (showDisguisedAppearance || showDisguisedRole) ? `/avatars/neutral_1.png` : p.avatar,
           profilePicture: (showDisguisedAppearance || showDisguisedRole) ? undefined : (p.profilePicture || null),
           role: showDisguisedRole ? 'guest' : p.role,
           socketId: p.socketId,
@@ -4011,8 +4370,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           platform: p.platform || 'web',
         };
       });
-
-      this.logger.log(`[broadcastParticipants] → ${viewer.displayName}: ${mapped.map(m => `${m.displayName}(muted=${m.isMuted},gagged=${m.isGagged},banned=${m.isBanned})`).join(', ')}`);
 
       this.server.to(socketId).emit('room:participants', {
         participants: mapped,
@@ -4103,13 +4460,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { roomId: string; userId: string },
     @ConnectedSocket() client: Socket,
   ) {
-    const { userId } = data;
     const user = client.data.user;
     const participant = this.participants.get(client.id);
 
-    if (!user || user.sub !== userId || !participant) {
+    if (!user || !participant) {
       return;
     }
+
+    // Use authenticated user.sub (JWT) — ignore client-sent userId which may mismatch
+    const userId = user.sub;
 
     // ★ BAN CHECK — Banlı kullanıcılar mikrofon alamaz
     if (participant.isBanned) {
@@ -4377,10 +4736,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return;
       }
 
-      // Aktif oda ve kullanıcı sayılarını hesapla
-      const rooms = await this.prisma.room.count({ where: { tenantId } });
-      const users = await this.prisma.user.count({ where: { tenantId } });
-      const onlineUsers = await this.prisma.user.count({ where: { tenantId, isOnline: true } });
+      // ★ Oda sayıları: normal + toplantı ayrı
+      const normalRooms = await this.prisma.room.count({ where: { tenantId, isMeetingRoom: false } });
+      const meetingRooms = await this.prisma.room.count({ where: { tenantId, isMeetingRoom: true } });
+
+      // ★ Kullanıcı sayısı: GodMaster hariç (gizli her yerde)
+      const users = await this.prisma.user.count({
+        where: { tenantId, role: { not: 'godmaster' } },
+      });
+
+      // ★ Çevrimiçi sayısı: in-memory socket Map'ten (DB yerine — gerçek zamanlı)
+      let onlineCount = 0;
+      this.participants.forEach((p) => {
+        if (p.tenantId === tenantId && p.role?.toLowerCase() !== 'godmaster') {
+          onlineCount++;
+        }
+      });
 
       client.emit('admin:tenantInfo', {
         tenant: {
@@ -4389,9 +4760,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           expiresAt: tenant.expiresAt?.toISOString(),
         },
         stats: {
-          totalRooms: rooms,
+          totalRooms: normalRooms,
+          meetingRooms,
           totalUsers: users,
-          onlineUsers,
+          onlineUsers: onlineCount,
         },
       });
 
@@ -4456,11 +4828,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       tenantId: actor.tenantId || '',
       challengerId: actor.userId,
       challengerName: actor.displayName,
-      challengerAvatar: actor.avatar || `https://api.dicebear.com/9.x/avataaars/svg?seed=${actor.displayName}`,
+      challengerAvatar: actor.avatar || '',
       challengerSocketId: client.id,
       opponentId: targetParticipant.userId,
       opponentName: targetParticipant.displayName,
-      opponentAvatar: targetParticipant.avatar || `https://api.dicebear.com/9.x/avataaars/svg?seed=${targetParticipant.displayName}`,
+      opponentAvatar: targetParticipant.avatar || '',
       opponentSocketId: targetSocket,
       startedAt: 0,
       duration: 180_000, // 3 dakika
@@ -4935,5 +5307,118 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     this.logger.log(`[DUEL] ${actor.displayName} voluntarily forfeiting in room ${actor.roomId}`);
     this.autoDuelForfeit(actor.roomId, actor.userId, actor.displayName, 'forfeit');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  FRIENDSHIP — Gerçek Zamanlı Arkadaşlık Eventleri
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Hedef userId'ye ait socket'i bul */
+  private findSocketByUserId(userId: string): Socket | null {
+    for (const [, socket] of this.server.sockets.sockets) {
+      if (socket.data?.user?.sub === userId) return socket;
+    }
+    return null;
+  }
+
+  @SubscribeMessage('friend:request')
+  async handleFriendRequest(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { receiverId: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const tenantId = user.tenantId || 'system';
+      const friendship = await this.friendService.sendRequest(user.sub, data.receiverId, tenantId);
+      // Gönderene onay
+      client.emit('friend:request:sent', friendship);
+      // Alıcıya bildirim
+      const receiverSocket = this.findSocketByUserId(data.receiverId);
+      if (receiverSocket) {
+        receiverSocket.emit('friend:request:received', friendship);
+      }
+    } catch (e: any) {
+      client.emit('friend:error', { message: e.message || 'İstek gönderilemedi' });
+    }
+  }
+
+  @SubscribeMessage('friend:accept')
+  async handleFriendAccept(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { friendshipId: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const friendship = await this.friendService.acceptRequest(data.friendshipId, user.sub);
+      // Her iki tarafa bildir
+      client.emit('friend:accepted', friendship);
+      const senderSocket = this.findSocketByUserId(friendship.senderId);
+      if (senderSocket) {
+        senderSocket.emit('friend:accepted', friendship);
+      }
+    } catch (e: any) {
+      client.emit('friend:error', { message: e.message || 'İstek kabul edilemedi' });
+    }
+  }
+
+  @SubscribeMessage('friend:reject')
+  async handleFriendReject(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { friendshipId: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      await this.friendService.rejectRequest(data.friendshipId, user.sub);
+      client.emit('friend:rejected', { friendshipId: data.friendshipId });
+    } catch (e: any) {
+      client.emit('friend:error', { message: e.message || 'İstek reddedilemedi' });
+    }
+  }
+
+  @SubscribeMessage('friend:remove')
+  async handleFriendRemove(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { friendshipId: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const friendship = await this.prisma.friendship.findUnique({ where: { id: data.friendshipId } });
+      if (!friendship) return;
+      const otherId = friendship.senderId === user.sub ? friendship.receiverId : friendship.senderId;
+      await this.friendService.removeFriend(data.friendshipId, user.sub);
+      client.emit('friend:removed', { friendshipId: data.friendshipId });
+      const otherSocket = this.findSocketByUserId(otherId);
+      if (otherSocket) {
+        otherSocket.emit('friend:removed', { friendshipId: data.friendshipId });
+      }
+    } catch (e: any) {
+      client.emit('friend:error', { message: e.message || 'Arkadaş silinemedi' });
+    }
+  }
+
+  @SubscribeMessage('friend:dm')
+  async handleFriendDm(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { receiverId: string; content: string },
+  ) {
+    const user = client.data.user;
+    if (!user) return;
+    try {
+      const tenantId = user.tenantId || 'system';
+      const message = await this.friendService.sendMessage(user.sub, data.receiverId, data.content, tenantId);
+      // Gönderene echo
+      client.emit('friend:dm:new', message);
+      // Alıcıya bildirim
+      const receiverSocket = this.findSocketByUserId(data.receiverId);
+      if (receiverSocket) {
+        receiverSocket.emit('friend:dm:new', message);
+      }
+    } catch (e: any) {
+      client.emit('friend:error', { message: e.message || 'Mesaj gönderilemedi' });
+    }
   }
 }

@@ -18,19 +18,19 @@ interface RadioStation {
 const RADIO_STATIONS: RadioStation[] = [
     { id: 'powerfm', name: 'Power FM', genre: 'Pop / Dance', url: 'https://listen.powerapp.com.tr/powerfm/mpeg/icecast.audio', icon: '⚡' },
     { id: 'powerturk', name: 'Power Türk', genre: 'Türkçe Pop', url: 'https://listen.powerapp.com.tr/powerturk/mpeg/icecast.audio', icon: '🎤' },
-    { id: 'kralpop', name: 'Kral Pop', genre: 'Türkçe Pop', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/KRAL_POP.mp3', icon: '👑' },
-    { id: 'kralfm', name: 'Kral FM', genre: 'Arabesk', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/KRAL_FM.mp3', icon: '🎵' },
-    { id: 'slowturk', name: 'SlowTürk', genre: 'Slow / Romantik', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/SLOW_TURK.mp3', icon: '💜' },
+    { id: 'kralpop', name: 'Kral Pop', genre: 'Türkçe Pop', url: 'https://listen.powerapp.com.tr/kralpop/mpeg/icecast.audio', icon: '👑' },
+    { id: 'kralfm', name: 'Kral FM', genre: 'Arabesk', url: 'https://listen.powerapp.com.tr/kralfm/mpeg/icecast.audio', icon: '🎵' },
+    { id: 'slowturk', name: 'SlowTürk', genre: 'Slow / Romantik', url: 'https://listen.powerapp.com.tr/slowturk/mpeg/icecast.audio', icon: '💜' },
     { id: 'fenomen', name: 'Radyo Fenomen', genre: 'Pop / Dans', url: 'https://listen.radyofenomen.com/fenomen/128/icecast.audio', icon: '🔥' },
-    { id: 'virginfm', name: 'Virgin Radio', genre: 'Pop / Rock', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/VIRGIN_RADIO.mp3', icon: '🎸' },
+    { id: 'virginfm', name: 'Virgin Radio', genre: 'Pop / Rock', url: 'https://listen.powerapp.com.tr/virginradio/mpeg/icecast.audio', icon: '🎸' },
     { id: 'metrofm', name: 'Metro FM', genre: 'Pop / Hit', url: 'https://listen.powerapp.com.tr/metrofm/mpeg/icecast.audio', icon: '🌆' },
     { id: 'joyfm', name: 'Joy FM', genre: 'Pop / Hit', url: 'https://listen.powerapp.com.tr/joyfm/mpeg/icecast.audio', icon: '😊' },
-    { id: 'superfm', name: 'Süper FM', genre: 'Türkçe Pop', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/SUPER_FM.mp3', icon: '🌟' },
+    { id: 'superfm', name: 'Süper FM', genre: 'Türkçe Pop', url: 'https://listen.powerapp.com.tr/superfm/mpeg/icecast.audio', icon: '🌟' },
     { id: 'bestfm', name: 'Best FM', genre: 'Türkçe Pop', url: 'https://listen.powerapp.com.tr/bestfm/mpeg/icecast.audio', icon: '🏆' },
     { id: 'radyo45lik', name: 'Radyo 45lik', genre: 'Nostalji / Retro', url: 'https://stream.radyo45lik.com:4545/stream', icon: '💿' },
     { id: 'powerfmxl', name: 'Power XL', genre: 'Retro / 90\'lar', url: 'https://listen.powerapp.com.tr/powerfmxl/mpeg/icecast.audio', icon: '🎶' },
     { id: 'joyturk', name: 'JoyTürk', genre: 'Türkçe Rock', url: 'https://listen.powerapp.com.tr/joyturk/mpeg/icecast.audio', icon: '🎧' },
-    { id: 'ntv', name: 'NTV Radyo', genre: 'Haber / Aktüel', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/NTV_RADYO.mp3', icon: '📰' },
+    { id: 'ntv', name: 'NTV Radyo', genre: 'Haber / Aktüel', url: 'https://listen.powerapp.com.tr/ntvradyo/mpeg/icecast.audio', icon: '📰' },
     { id: 'alemfm', name: 'Alem FM', genre: 'Pop / Eğlence', url: 'https://listen.powerapp.com.tr/alemfm/mpeg/icecast.audio', icon: '🎪' },
 ];
 
@@ -173,101 +173,149 @@ export function RadioPlayer() {
         }
     }, [isMuted, volume]);
 
+    // Sonraki/Önceki istasyon
+    const switchStation = useCallback((direction: 1 | -1) => {
+        const idx = RADIO_STATIONS.findIndex(s => s.id === currentStation.id);
+        const nextIdx = (idx + direction + RADIO_STATIONS.length) % RADIO_STATIONS.length;
+        playStation(RADIO_STATIONS[nextIdx]);
+    }, [currentStation, playStation]);
+
+    const chatTeal = "#4fb1b3";
+    const effectiveVolume = isMuted ? 0 : volume;
+
     return (
-        <div className="relative group overflow-visible rounded-2xl border border-white/10 bg-[#0f1016]">
-            {/* Gradient arka plan */}
-            <div className="absolute inset-0 bg-gradient-to-r from-violet-600/20 via-fuchsia-600/20 to-transparent opacity-50 group-hover:opacity-100 transition-opacity duration-500 rounded-2xl"></div>
+        <div style={{ position: 'relative', overflow: 'visible' }}>
+            {/* Compact Radio Card */}
+            <div className="slim-radio-card">
 
-            {/* Üst kısım — İstasyon bilgisi */}
-            <div className="relative p-3 pb-2 flex items-center gap-3">
-                {/* Müzik animasyonu / Play butonu */}
-                <button
-                    onClick={togglePlay}
-                    className="relative w-12 h-12 rounded-xl bg-black/60 flex items-center justify-center border border-white/10 shadow-lg overflow-hidden shrink-0 hover:bg-black/40 transition-colors cursor-pointer group/play"
-                >
-                    {isLoading ? (
-                        <Loader2 className="w-5 h-5 text-violet-400 animate-spin" />
-                    ) : isPlaying ? (
-                        <>
-                            {/* Müzik çubukları */}
-                            <div className="flex items-end gap-0.5 h-6 group-hover/play:opacity-0 transition-opacity">
-                                <span className="w-1 bg-gradient-to-t from-violet-500 to-fuchsia-500 rounded-t-sm animate-music-bar" style={{ height: '12px' }}></span>
-                                <span className="w-1 bg-gradient-to-t from-violet-500 to-fuchsia-500 rounded-t-sm animate-music-bar" style={{ height: '20px', animationDelay: '0.1s' }}></span>
-                                <span className="w-1 bg-gradient-to-t from-violet-500 to-fuchsia-500 rounded-t-sm animate-music-bar" style={{ height: '16px', animationDelay: '0.2s' }}></span>
-                                <span className="w-1 bg-gradient-to-t from-violet-500 to-fuchsia-500 rounded-t-sm animate-music-bar" style={{ height: '8px', animationDelay: '0.3s' }}></span>
-                            </div>
-                            {/* Hover'da pause ikonu */}
-                            <Pause className="w-5 h-5 text-white fill-white absolute opacity-0 group-hover/play:opacity-100 transition-opacity" />
-                        </>
-                    ) : (
-                        <Play className="w-5 h-5 text-white fill-white ml-0.5" />
-                    )}
-                </button>
-
-                {/* İstasyon bilgisi */}
-                <div className="flex-1 min-w-0 overflow-hidden">
-                    <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold tracking-wide text-white truncate">
-                            {currentStation.icon} {currentStation.name}
+                {/* Station Display */}
+                <div className="slim-radio-display">
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3, marginBottom: 1 }}>
+                        <span style={{ fontSize: 10 }}>{currentStation.icon}</span>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: '#e2e8f0', letterSpacing: 0.3 }}>
+                            {currentStation.name}
                         </span>
                         {isPlaying && (
-                            <span className="text-[8px] font-bold text-white px-1.5 py-0.5 rounded uppercase tracking-wider animate-pulse bg-red-600 shadow-[0_0_8px_#dc2626] shrink-0 ml-2">
-                                LIVE
-                            </span>
+                            <span style={{
+                                fontSize: 5, fontWeight: 800, color: '#fff', padding: '1px 3px', borderRadius: 2,
+                                background: chatTeal, marginLeft: 2,
+                                animation: 'pulse 2s ease-in-out infinite',
+                            }}>CANLI</span>
                         )}
                     </div>
-                    <div className="w-full overflow-hidden relative h-4">
-                        <div className="absolute whitespace-nowrap text-[10px] text-gray-400 font-medium animate-marquee">
-                            {currentStation.genre} • {currentStation.name} Canlı Yayın • SopranoChat Radio
+                    <p style={{
+                        fontSize: 8, fontWeight: 700, textTransform: 'uppercase',
+                        letterSpacing: 0.5, color: 'rgba(79,177,179,0.7)', margin: 0,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                        {currentStation.genre}
+                    </p>
+                </div>
+
+                {/* Controls Row */}
+                <div className="slim-radio-controls">
+                    <button className="slim-btn-skip" onClick={() => switchStation(-1)}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M20 18V6l-8 6 8 6zm-2 0V6H6v12h12zM4 6H2v12h2V6z" /></svg>
+                    </button>
+
+                    <button className={`slim-btn-play ${isPlaying ? 'active' : ''}`} onClick={togglePlay}>
+                        {isLoading ? (
+                            <Loader2 style={{ width: 14, height: 14, animation: 'spin 1s linear infinite' }} />
+                        ) : isPlaying ? (
+                            <Pause style={{ width: 14, height: 14, fill: 'currentColor' }} />
+                        ) : (
+                            <Play style={{ width: 14, height: 14, fill: 'currentColor', marginLeft: 1 }} />
+                        )}
+                    </button>
+
+                    <button className="slim-btn-skip" onClick={() => switchStation(1)}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M4 18V6l8 6-8 6zm2 0V6h12v12H6zm16-12h-2v12h2V6z" /></svg>
+                    </button>
+                </div>
+
+                {/* Volume Slider */}
+                <div style={{ padding: '0 4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <button
+                            onClick={toggleMute}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex' }}
+                        >
+                            {isMuted || volume === 0 ? (
+                                <VolumeX style={{ width: 12, height: 12, color: '#475569' }} />
+                            ) : (
+                                <Volume2 style={{ width: 12, height: 12, color: 'rgba(79,177,179,0.6)' }} />
+                            )}
+                        </button>
+                        <div
+                            className="slim-volume-track"
+                            onClick={(e) => {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                                setVolume(x);
+                                setIsMuted(x === 0);
+                                localStorage.setItem('soprano_radio_volume', x.toString());
+                            }}
+                        >
+                            <div className="slim-volume-fill" style={{ width: `${effectiveVolume * 100}%` }} />
+                            <div className="slim-volume-knob" style={{ left: `${effectiveVolume * 100}%` }} />
                         </div>
                     </div>
                 </div>
-            </div>
 
-            {/* Alt kontroller */}
-            <div className="relative px-3 pb-3 pt-1 flex items-center gap-2 border-t border-white/5 mt-1">
-                {/* İstasyon Listesi toggle */}
-                <div className="relative flex-1" ref={stationListRef}>
+                {/* Channels Button */}
+                <div style={{ position: 'relative' }} ref={stationListRef}>
                     <button
+                        className="slim-channels-btn"
                         onClick={() => { setShowStationList(!showStationList); setShowVolumeSlider(false); }}
-                        className="w-full h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center gap-1.5 text-gray-300 hover:text-white transition-colors border border-white/5 text-[11px] font-medium cursor-pointer"
                     >
-                        <Radio className="w-3 h-3" />
-                        Kanallar
-                        {showStationList ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+                        <Radio style={{ width: 10, height: 10 }} />
+                        KANALLAR
                     </button>
 
-                    {/* İstasyon Listesi Dropdown */}
+                    {/* Station List Dropdown */}
                     {showStationList && (
-                        <div className="absolute bottom-full left-0 w-72 mb-2 bg-[#12131a] border border-white/10 rounded-xl shadow-2xl overflow-hidden z-[100] animate-in fade-in slide-in-from-bottom-2"
-                            style={{ maxHeight: '320px' }}
-                        >
-                            <div className="px-3 py-2 border-b border-white/10 flex items-center gap-2">
-                                <Radio className="w-3.5 h-3.5 text-violet-400" />
-                                <span className="text-[11px] font-bold text-violet-300 uppercase tracking-wider">Radyo Kanalları</span>
-                                <span className="ml-auto text-[9px] text-gray-500">{RADIO_STATIONS.length} kanal</span>
+                        <div className="slim-dropdown" style={{
+                            position: 'absolute', bottom: '100%', left: 0, width: '100%', marginBottom: 6,
+                            animation: 'contentFadeIn 0.2s ease both',
+                        }}>
+                            <div style={{
+                                padding: '8px 12px', borderBottom: '1px solid #e2e8f0',
+                                display: 'flex', alignItems: 'center', gap: 6,
+                            }}>
+                                <Radio style={{ width: 10, height: 10, color: '#3b82f6' }} />
+                                <span style={{ fontSize: 8, fontWeight: 800, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: 1.5 }}>Radyo Kanalları</span>
+                                <span style={{ marginLeft: 'auto', fontSize: 7, color: '#94a3b8' }}>{RADIO_STATIONS.length}</span>
                             </div>
-                            <div className="overflow-y-auto custom-scrollbar" style={{ maxHeight: '270px' }}>
+                            <div style={{ maxHeight: 200, overflowY: 'auto' }}>
                                 {RADIO_STATIONS.map((station) => (
                                     <button
                                         key={station.id}
+                                        className={`slim-dropdown-item ${currentStation.id === station.id ? 'active' : ''}`}
                                         onClick={() => handleStationSelect(station)}
-                                        className={`w-full flex items-center gap-3 px-3 py-2.5 hover:bg-white/10 transition-colors text-left cursor-pointer border-b border-white/[0.03] last:border-b-0
-                                            ${currentStation.id === station.id ? 'bg-violet-500/15 border-l-2 border-l-violet-500' : ''}
-                                        `}
+                                        style={{
+                                            textAlign: 'left',
+                                            borderLeft: currentStation.id === station.id ? `2px solid ${chatTeal}` : '2px solid transparent',
+                                        }}
                                     >
-                                        <span className="text-base w-6 text-center shrink-0">{station.icon}</span>
-                                        <div className="flex-1 min-w-0">
-                                            <div className={`text-xs font-semibold truncate ${currentStation.id === station.id ? 'text-violet-300' : 'text-white'}`}>
-                                                {station.name}
+                                        <span style={{ fontSize: 12, width: 16, textAlign: 'center', flexShrink: 0 }}>{station.icon}</span>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div style={{
+                                                fontSize: 10, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                color: currentStation.id === station.id ? '#1e293b' : '#475569',
+                                            }}>{station.name}</div>
+                                            <div style={{ fontSize: 8, color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {station.genre}
                                             </div>
-                                            <div className="text-[9px] text-gray-500 truncate">{station.genre}</div>
                                         </div>
                                         {currentStation.id === station.id && isPlaying && (
-                                            <div className="flex items-end gap-0.5 h-3 shrink-0">
-                                                <span className="w-0.5 bg-violet-400 rounded-t-sm animate-music-bar" style={{ height: '6px' }}></span>
-                                                <span className="w-0.5 bg-violet-400 rounded-t-sm animate-music-bar" style={{ height: '10px', animationDelay: '0.15s' }}></span>
-                                                <span className="w-0.5 bg-violet-400 rounded-t-sm animate-music-bar" style={{ height: '8px', animationDelay: '0.3s' }}></span>
+                                            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1.5, height: 10, flexShrink: 0 }}>
+                                                {[4, 8, 6].map((h, i) => (
+                                                    <span key={i} style={{
+                                                        width: 2, height: h, borderRadius: 1,
+                                                        background: chatTeal,
+                                                        animation: `musicBar 0.8s ease-in-out ${i * 0.15}s infinite alternate`,
+                                                    }} />
+                                                ))}
                                             </div>
                                         )}
                                     </button>
@@ -276,47 +324,20 @@ export function RadioPlayer() {
                         </div>
                     )}
                 </div>
-
-                {/* Ses Kontrolü */}
-                <div className="relative" ref={volumeRef}>
-                    <button
-                        onClick={() => { setShowVolumeSlider(!showVolumeSlider); setShowStationList(false); }}
-                        onDoubleClick={toggleMute}
-                        className="h-8 w-10 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-300 hover:text-white transition-colors border border-white/5 cursor-pointer"
-                        title="Ses (çift tıklayarak sessize al)"
-                    >
-                        {isMuted || volume === 0 ? (
-                            <VolumeX className="w-3.5 h-3.5 text-red-400" />
-                        ) : (
-                            <Volume2 className="w-3.5 h-3.5" />
-                        )}
-                    </button>
-
-                    {/* Volume Slider */}
-                    {showVolumeSlider && (
-                        <div className="absolute bottom-full right-0 mb-2 bg-[#12131a] border border-white/10 rounded-xl shadow-2xl overflow-hidden z-[100] px-3 py-3 animate-in fade-in slide-in-from-bottom-2">
-                            <div className="flex items-center gap-3">
-                                <VolumeX className="w-3 h-3 text-gray-500 shrink-0 cursor-pointer" onClick={toggleMute} />
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="1"
-                                    step="0.01"
-                                    value={isMuted ? 0 : volume}
-                                    onChange={handleVolumeChange}
-                                    className="w-24 h-1.5 appearance-none bg-white/10 rounded-full outline-none cursor-pointer
-                                        [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-violet-500 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-[0_0_6px_rgba(139,92,246,0.5)]
-                                        [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:bg-violet-500 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:border-none"
-                                />
-                                <Volume2 className="w-3 h-3 text-gray-500 shrink-0" />
-                            </div>
-                            <div className="text-center mt-1.5">
-                                <span className="text-[9px] text-gray-500 font-mono">{Math.round((isMuted ? 0 : volume) * 100)}%</span>
-                            </div>
-                        </div>
-                    )}
-                </div>
             </div>
+
+            {/* Keyframe animations */}
+            <style>{`
+                @keyframes musicBar {
+                    0% { height: 3px; }
+                    100% { height: 12px; }
+                }
+                @keyframes contentFadeIn {
+                    from { opacity: 0; transform: translateY(4px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+            `}</style>
         </div>
     );
 }
+
